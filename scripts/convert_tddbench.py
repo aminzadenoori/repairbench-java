@@ -53,6 +53,7 @@ MIN_PROBLEM_WORDS = 10
 TEST_NAME_RE = re.compile(r"(^Test\w*|\w*(Test|Tests|TestCase|IT))\.java$")
 DIFF_FILE_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)", re.M)
 JDK_RE = re.compile(r"java-(1\.8\.0|\d+)-amazon-corretto")
+JAVA_HOME_RE = re.compile(r"export JAVA_HOME=(\S+?)/?\s*&&")
 
 
 # --------------------------------------------------------------------------- helpers
@@ -257,7 +258,13 @@ def convert(csv_path: Path, out: Path, ai4i_root: str) -> dict:
                 "jdk": jdk,
                 "build_tool": tool,
                 "environment_hint": f"jdk{jdk}" if jdk else None,
-                "upstream_docker_image": image if image.startswith("mswebench") else None,
+                # Frozen per-instance image, pulled with `apptainer pull docker://...`
+                # (no Docker daemon needed): SWE-PolyBench's GHCR images or Multi-SWE-bench's.
+                "frozen_image": (f"docker://{image}" if image.startswith("mswebench")
+                                 else f"docker://ghcr.io/timesler/swe-polybench.eval.x86_64.{iid.lower()}:v1.1"),
+                # Where that image keeps its own copy of the repo (hidden from the agent).
+                "frozen_image_repo_path": (f"/home/{slug(repo)}" if image.startswith("mswebench") else "/testbed"),
+                "frozen_java_home": (JAVA_HOME_RE.search(cmd).group(1) if JAVA_HOME_RE.search(cmd) else None),
             },
             "tests": {
                 "classes": tests,

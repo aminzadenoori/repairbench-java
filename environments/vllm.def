@@ -1,0 +1,26 @@
+# OpenAI-compatible model server for the four open LLMs (configs/models.json).
+#   apptainer build --fakeroot --build-arg VLLM_VERSION=v0.11.0 vllm.sif environments/vllm.def
+# Pick the newest vLLM release whose notes list all four models (Qwen3-Coder-Next,
+# gpt-oss, Devstral, GLM-4.7) and record the version in the run artifacts.
+# Weights are NOT in the image: they are mounted read-only from MODELS_ROOT.
+Bootstrap: docker
+From: vllm/vllm-openai:{{ VLLM_VERSION }}
+
+%arguments
+    VLLM_VERSION=v0.11.0
+
+%labels
+    org.repairbench.runtime vllm
+    org.repairbench.vllm {{ VLLM_VERSION }}
+
+%environment
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+    export VLLM_NO_USAGE_STATS=1
+    export DO_NOT_TRACK=1
+
+%runscript
+    exec vllm "$@"
+
+%test
+    python3 -c "import vllm; print('vllm', vllm.__version__)"

@@ -1,0 +1,61 @@
+# Java runtime for RepairBench tasks: one pinned JDK per image.
+# Build (Apptainer >= 1.2 for --build-arg):
+#   apptainer build --fakeroot --build-arg JDK=11 java-ubuntu22.04-jdk11.sif environments/java.def
+# or simply: scripts/build_images.sh <images_dir>
+#
+# The image carries no project dependencies: those live in the shared cache made by
+# scripts/warm_dependencies.sh and are mounted read-only at /cache in offline runs.
+Bootstrap: docker
+From: ubuntu:22.04
+
+%arguments
+    JDK=11
+    MAVEN_VERSION=3.9.9
+    GRADLE_VERSION=8.10.2
+
+%labels
+    org.repairbench.runtime java
+    org.repairbench.jdk temurin-{{ JDK }}
+    org.repairbench.maven {{ MAVEN_VERSION }}
+    org.repairbench.gradle {{ GRADLE_VERSION }}
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl wget gnupg git unzip zip patch python3 locales procps less
+    # Eclipse Temurin JDK from the Adoptium apt repository
+    install -d /etc/apt/keyrings
+    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \
+        | gpg --dearmor > /etc/apt/keyrings/adoptium.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb jammy main" \
+        > /etc/apt/sources.list.d/adoptium.list
+    apt-get update
+    apt-get install -y --no-install-recommends temurin-{{ JDK }}-jdk
+    ln -sfn "$(ls -d /usr/lib/jvm/temurin-{{ JDK }}-jdk-*)" /usr/lib/jvm/repairbench-jdk
+    # Pinned Maven (3.9+ is needed for MAVEN_ARGS and maven.repo.local.tail)
+    curl -fsSL "https://archive.apache.org/dist/maven/maven-3/{{ MAVEN_VERSION }}/binaries/apache-maven-{{ MAVEN_VERSION }}-bin.tar.gz" \
+        | tar -xz -C /opt
+    ln -sfn /opt/apache-maven-{{ MAVEN_VERSION }} /opt/maven
+    # Pinned Gradle, used when a project has no wrapper (wrappers come from the cache)
+    curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-{{ GRADLE_VERSION }}-bin.zip"
+    unzip -q /tmp/gradle.zip -d /opt && rm /tmp/gradle.zip
+    ln -sfn /opt/gradle-{{ GRADLE_VERSION }} /opt/gradle
+    ln -sfn /opt/maven/bin/mvn /usr/local/bin/mvn
+    ln -sfn /opt/gradle/bin/gradle /usr/local/bin/gradle
+    sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen && locale-gen
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+%environment
+    export JAVA_HOME=/usr/lib/jvm/repairbench-jdk
+    export PATH="$JAVA_HOME/bin:/opt/maven/bin:/opt/gradle/bin:$PATH"
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+    export MAVEN_OPTS="${MAVEN_OPTS:--Xmx3g}"
+    export GRADLE_OPTS="${GRADLE_OPTS:--Xmx3g -Dorg.gradle.daemon=false}"
+
+%test
+    java -version
+    mvn -v
+    gradle --version --offline

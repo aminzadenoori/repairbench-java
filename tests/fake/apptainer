@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""A stand-in for `apptainer`, used only by tests/e2e_fake.sh.
+
+It supports the subset the scripts use (exec, instance start/stop) and emulates the two
+properties that matter for the pipeline: bind mounts (real `mount --bind` in a private
+mount namespace) and `--net --network none` (a real empty network namespace via unshare).
+The "image" is ignored: commands run with the host's tools plus tests/fake/bin first in
+PATH. Needs root or unprivileged user namespaces.
+"""
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+STATE = Path(os.environ.get("FAKE_APPTAINER_STATE", "/tmp/fake-apptainer"))
+STATE.mkdir(parents=True, exist_ok=True)
+VALUE_OPTS = {"--bind", "-B", "--env", "--pwd", "--network", "--build-arg"}
+FLAG_OPTS = {"--net", "--containall", "--no-home", "--nv", "--fakeroot", "--force", "--cleanenv"}
+
+
+def parse(args):
+    opts = {"bind": [], "env": [], "pwd": None, "nonet": False}
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        if a in VALUE_OPTS:
+            v = args[i + 1]; i += 2
+            if a in ("--bind", "-B"):
+                opts["bind"].append(v)
+            elif a == "--env":
+                opts["env"].append(v)
+            elif a == "--pwd":
+                opts["pwd"] = v
+            elif a == "--network" and v == "none":
+                opts["nonet"] = True
+        elif a in FLAG_OPTS:
+            i += 1
+        else:
+            sys.exit(f"fake apptainer: unsupported option {a}")
+    return opts, args[i:]
+
+
+def run(opts, cmd):
+    script = ["set -e"]
+    for b in opts["bind"]:
+        src, dst = b.split(":")[:2]
+        ro = b.endswith(":ro")
+        script.append(f"mkdir -p {shlex.quote(dst)} && mount --bind {shlex.quote(src)} {shlex.quote(dst)}")
+        if ro:
+            script.append(f"mount -o remount,bind,ro {shlex.quote(dst)}")
+    exports = " ".join(f"export {shlex.quote(e)};" for e in opts["env"])
+    fake_bin = str(Path(__file__).resolve().parent / "bin")
+    # `bash -l` resets PATH, so also mount the fake tools over any real ones.
+    for tool in Path(fake_bin).iterdir():
+        script.append(f"for p in $(which -a {tool.name} 2>/dev/null | sort -u); do "
+                      f"[ \"$p\" != {shlex.quote(str(tool))} ] && mount --bind {shlex.quote(str(tool))} \"$p\"; done; true")
+    inner = f"export PATH={shlex.quote(fake_bin)}:$PATH; {exports} cd {shlex.quote(opts['pwd'] or '/')} && exec \"$@\""
+    script.append(inner)
+    unshare = ["unshare", "-m", "--propagation", "private"] + (["-n"] if opts["nonet"] else [])
+    return subprocess.call(unshare + ["bash", "-c", "\n".join(script), "fake"] + cmd)
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        sys.exit("usage: apptainer exec|instance ...")
+    if argv[0] == "instance":
+        if argv[1] == "start":
+            opts, rest = parse(argv[2:])
+            image, name = rest
+            (STATE / f"{name}.json").write_text(json.dumps(opts))
+            return 0
+        if argv[1] == "stop":
+            (STATE / f"{argv[2]}.json").unlink(missing_ok=True)
+            return 0
+        sys.exit("fake apptainer: unsupported instance command")
+    if argv[0] == "exec":
+        opts, rest = parse(argv[1:])
+        target, cmd = rest[0], rest[1:]
+        if target.startswith("instance://"):
+            f = STATE / f"{target[len('instance://'):]}.json"
+            if not f.exists():
+                sys.exit(f"fake apptainer: no instance {target}")
+            base = json.loads(f.read_text())
+            base["env"] += opts["env"]
+            base["pwd"] = opts["pwd"] or base["pwd"]
+            opts = base
+        return run(opts, cmd)
+    sys.exit(f"fake apptainer: unsupported command {argv[0]}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

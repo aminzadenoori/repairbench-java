@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""A stand-in for Maven, used only by tests/e2e_fake.sh with the synthetic demo task.
+
+`mvn ... -Dtest=CalcTest ...` "runs" the test methods found in the demo test file and
+writes a Surefire XML report. testAdd* pass only if Calc.add really adds; other tests pass.
+Any attempt to download (dependency:get) fails, as it would offline.
+"""
+import re
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if any(a.startswith("dependency:get") for a in args):
+    print("[ERROR] Could not transfer artifact (offline)"); sys.exit(1)
+sel = next((a.split("=", 1)[1] for a in args if a.startswith("-Dtest=")), None)
+root = Path.cwd()
+main = root / "src/main/java/demo/Calc.java"
+test = root / "src/test/java/demo/CalcTest.java"
+if not main.exists():
+    print("[ERROR] no sources"); sys.exit(1)
+adds = "return a + b;" in main.read_text()
+cases = []
+if test.exists() and (sel is None or "CalcTest" in sel.split(",")):
+    for name in re.findall(r"void\s+(test\w+)\s*\(", test.read_text()):
+        ok = adds if name.startswith("testAdd") else True
+        cases.append((name, ok))
+out = root / "target/surefire-reports"
+out.mkdir(parents=True, exist_ok=True)
+xml = ['<testsuite name="demo.CalcTest">']
+for name, ok in cases:
+    body = "" if ok else '<failure message="expected 5"/>'
+    xml.append(f'<testcase classname="demo.CalcTest" name="{name}">{body}</testcase>')
+xml.append("</testsuite>")
+(out / "TEST-demo.CalcTest.xml").write_text("\n".join(xml))
+print(f"[INFO] Tests run: {len(cases)}, Failures: {sum(not ok for _, ok in cases)}")
+sys.exit(0 if all(ok for _, ok in cases) else 1)
