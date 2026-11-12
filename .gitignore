@@ -1,0 +1,6 @@
+out/
+mirrors/
+mirrors-full/
+cache/
+__pycache__/
+*.pyc

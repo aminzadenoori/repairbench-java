@@ -1,0 +1,38 @@
+{
+  "_note": "Four open-weight LLMs from Hugging Face, one per vendor. Weights are downloaded once to MODELS_ROOT on shared storage and mounted read-only; one vLLM server per GPU node, agents send requests to it. Check each model card and your vLLM version for the exact parser flags before the first run.",
+  "models": [
+    {
+      "name": "qwen3-coder-next",
+      "hf_repo": "Qwen/Qwen3-Coder-Next",
+      "vendor": "Alibaba Qwen",
+      "licence": "Apache-2.0",
+      "architecture": "MoE, about 80B total / 3B active (model card)",
+      "vllm_args": ["--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder"]
+    },
+    {
+      "name": "gpt-oss-120b",
+      "hf_repo": "openai/gpt-oss-120b",
+      "vendor": "OpenAI (open weights)",
+      "licence": "Apache-2.0",
+      "architecture": "MoE, 117B total / 5.1B active, MXFP4; fits one 80 GB GPU",
+      "vllm_args": ["--enable-auto-tool-choice", "--tool-call-parser", "openai"]
+    },
+    {
+      "name": "devstral-small",
+      "hf_repo": "mistralai/Devstral-Small-2507",
+      "vendor": "Mistral AI",
+      "licence": "Apache-2.0",
+      "architecture": "dense 24B, trained for agentic software engineering",
+      "vllm_args": ["--tokenizer-mode", "mistral", "--config-format", "mistral", "--load-format", "mistral",
+                    "--enable-auto-tool-choice", "--tool-call-parser", "mistral"]
+    },
+    {
+      "name": "glm-4.7-flash",
+      "hf_repo": "zai-org/GLM-4.7-Flash",
+      "vendor": "Zhipu AI (Z.ai)",
+      "licence": "see model card",
+      "architecture": "see model card",
+      "vllm_args": ["--enable-auto-tool-choice", "--tool-call-parser", "glm47", "--reasoning-parser", "glm45"]
+    }
+  ]
+}
