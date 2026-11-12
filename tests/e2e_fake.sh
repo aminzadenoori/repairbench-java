@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end test of the pipeline WITHOUT Apptainer, Maven or a GPU.
-# A fake `apptainer` (real bind mounts + a real empty network namespace via unshare),
-# a fake `mvn` and a scripted model server drive one synthetic Java task through:
+# A fake `apptainer`, a fake `mvn` and a scripted model server drive one synthetic Java
+# task through:
 #   validate (ORACLE/BASE x3) -> agent run with leak self-test -> evaluation -> metrics,
-# for both runtimes (built and frozen). Needs root or unprivileged user namespaces.
-#   tests/e2e_fake.sh
+# for both runtimes (built and frozen). Works as a normal user; the network is cut with
+# `unshare -rn` when user namespaces are allowed (see tests/fake/apptainer for the modes).
+#   tests/e2e_fake.sh            (E2E_DIR=<dir> keeps the test folder for inspection)
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=${E2E_DIR:-$(mktemp -d)}; trap 'kill $SRV 2>/dev/null || true; [[ -n ${E2E_DIR:-} ]] || rm -rf "$T"' EXIT
@@ -41,7 +42,23 @@ PORT=$((20000 + RANDOM % 20000))
 python3 -I "$ROOT/tests/fake/model_server.py" "$PORT" & SRV=$!
 sleep 1
 
-check() { python3 -I -c "import json,sys; d=json.load(open(sys.argv[1])); v=eval(sys.argv[2],{},{'d':d}); print(sys.argv[1].split('/')[-1], '->', v); sys.exit(0 if v else 1)" "$1" "$2"; }
+MODE=$(apptainer fake-mode)
+echo "fake apptainer mode: $MODE"
+[[ $MODE == plain ]] && echo "note: user namespaces are not available here, so the network can't be cut; the leak self-test will fail if this node has internet access"
+
+show_logs() {  # print what is needed to see why a check failed
+  echo "----- diagnostics ($T kept) -----"
+  for f in "$TASK"/validation/*.log "$T"/runs/*/demo__calc-1/*.log "$T"/runs/*/demo__calc-1/*.json; do
+    [[ -f $f ]] || continue
+    echo "== $f"; tail -n 25 "$f"
+  done
+  E2E_DIR=keep
+}
+check() {
+  if [[ ! -f $1 ]]; then echo "missing: $1"; show_logs; exit 1; fi
+  python3 -I -c "import json,sys; d=json.load(open(sys.argv[1])); v=eval(sys.argv[2],{},{'d':d}); print(sys.argv[1].split('/')[-1], '->', v); sys.exit(0 if v else 1)" "$1" "$2" \
+    || { show_logs; exit 1; }
+}
 
 for RT in built frozen; do
   echo "=== runtime: $RT"

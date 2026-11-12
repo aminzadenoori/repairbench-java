@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """A stand-in for `apptainer`, used only by tests/e2e_fake.sh.
 
-It supports the subset the scripts use (exec, instance start/stop) and emulates the two
-properties that matter for the pipeline: bind mounts (real `mount --bind` in a private
-mount namespace) and `--net --network none` (a real empty network namespace via unshare).
-The "image" is ignored: commands run with the host's tools plus tests/fake/bin first in
-PATH. Needs root or unprivileged user namespaces.
+Supports the subset the scripts use (exec, instance start/stop) and emulates the two
+properties that matter: bind mounts and `--net --network none`.
+
+Modes, chosen automatically (override with FAKE_APPTAINER_MODE):
+  mount      root: real `mount --bind` in a private mount namespace (+ empty net namespace)
+  translate  normal user: container paths (/work, /cache, ...) are rewritten to the host
+             paths in arguments and environment; the network is cut with `unshare -rn`
+             when unprivileged user namespaces are allowed
+  plain      like translate, but without network isolation (last resort)
+The "image" is ignored: commands run with the host's tools, with tests/fake/bin first in
+PATH (login shells are run as non-login shells so PATH is kept).
 """
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +25,20 @@ STATE = Path(os.environ.get("FAKE_APPTAINER_STATE", "/tmp/fake-apptainer"))
 STATE.mkdir(parents=True, exist_ok=True)
 VALUE_OPTS = {"--bind", "-B", "--env", "--pwd", "--network", "--build-arg"}
 FLAG_OPTS = {"--net", "--containall", "--no-home", "--nv", "--fakeroot", "--force", "--cleanenv"}
+FAKE_BIN = str(Path(__file__).resolve().parent / "bin")
+
+
+def works(cmd):
+    return subprocess.run(cmd, capture_output=True).returncode == 0
+
+
+def mode():
+    m = os.environ.get("FAKE_APPTAINER_MODE")
+    if m:
+        return m
+    if os.geteuid() == 0 and works(["unshare", "-m", "true"]):
+        return "mount"
+    return "translate" if works(["unshare", "-rn", "true"]) else "plain"
 
 
 def parse(args):
@@ -42,34 +63,70 @@ def parse(args):
     return opts, args[i:]
 
 
-def run(opts, cmd):
+def no_login(cmd):
+    # `bash -lc` would reset PATH from /etc/profile on some systems and lose the fake tools
+    if len(cmd) >= 2 and cmd[0] == "bash" and cmd[1] == "-lc":
+        return ["bash", "-c"] + cmd[2:]
+    return cmd
+
+
+def run_mount(opts, cmd):
     script = ["set -e"]
     for b in opts["bind"]:
         src, dst = b.split(":")[:2]
-        ro = b.endswith(":ro")
         script.append(f"mkdir -p {shlex.quote(dst)} && mount --bind {shlex.quote(src)} {shlex.quote(dst)}")
-        if ro:
+        if b.endswith(":ro"):
             script.append(f"mount -o remount,bind,ro {shlex.quote(dst)}")
     exports = " ".join(f"export {shlex.quote(e)};" for e in opts["env"])
-    fake_bin = str(Path(__file__).resolve().parent / "bin")
-    # `bash -l` resets PATH, so also mount the fake tools over any real ones.
-    for tool in Path(fake_bin).iterdir():
-        script.append(f"for p in $(which -a {tool.name} 2>/dev/null | sort -u); do "
-                      f"[ \"$p\" != {shlex.quote(str(tool))} ] && mount --bind {shlex.quote(str(tool))} \"$p\"; done; true")
-    inner = f"export PATH={shlex.quote(fake_bin)}:$PATH; {exports} cd {shlex.quote(opts['pwd'] or '/')} && exec \"$@\""
-    script.append(inner)
+    script.append(f"export PATH={shlex.quote(FAKE_BIN)}:$PATH; {exports} "
+                  f"cd {shlex.quote(opts['pwd'] or '/')} && exec \"$@\"")
     unshare = ["unshare", "-m", "--propagation", "private"] + (["-n"] if opts["nonet"] else [])
     return subprocess.call(unshare + ["bash", "-c", "\n".join(script), "fake"] + cmd)
+
+
+def run_translate(opts, cmd, isolate_net):
+    pairs = []
+    for b in opts["bind"]:
+        src, dst = b.split(":")[:2]
+        pairs.append((dst.rstrip("/"), str(Path(src).resolve())))
+    pairs.sort(key=lambda p: -len(p[0]))          # longest container path first
+
+    def tr(s):
+        for dst, src in pairs:
+            s = s.replace(dst + "/", src + "/")
+            if s == dst or s.endswith("=" + dst) or s.endswith(" " + dst):
+                s = s[: len(s) - len(dst)] + src
+        return s
+
+    env = dict(os.environ)
+    env["PATH"] = FAKE_BIN + ":" + env.get("PATH", "")
+    for e in opts["env"]:
+        k, _, v = e.partition("=")
+        env[k] = tr(v)
+    cwd = tr(opts["pwd"]) if opts["pwd"] else None
+    cmd = [tr(c) for c in cmd]
+    prefix = ["unshare", "-rn"] if (opts["nonet"] and isolate_net) else []
+    return subprocess.call(prefix + cmd, env=env, cwd=cwd)
+
+
+def run(opts, cmd):
+    cmd = no_login(cmd)
+    m = mode()
+    if m == "mount":
+        return run_mount(opts, cmd)
+    return run_translate(opts, cmd, isolate_net=(m == "translate"))
 
 
 def main():
     argv = sys.argv[1:]
     if not argv:
         sys.exit("usage: apptainer exec|instance ...")
+    if argv[0] == "fake-mode":
+        print(mode()); return 0
     if argv[0] == "instance":
         if argv[1] == "start":
             opts, rest = parse(argv[2:])
-            image, name = rest
+            _image, name = rest
             (STATE / f"{name}.json").write_text(json.dumps(opts))
             return 0
         if argv[1] == "stop":

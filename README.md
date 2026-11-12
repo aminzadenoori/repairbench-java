@@ -43,14 +43,20 @@ Nothing to compile or `pip install` for the pipeline itself.
 unzip tddbench-java-repairbench.zip        # or: git clone <your copy of this repo>
 cd tddbench-java-repairbench
 
-# where large files go (use scratch, not home)
-export IMAGES=/scratch/$USER/rb/images     # .sif images
-export CACHE=/scratch/$USER/rb/cache       # Maven/Gradle caches
-export APPTAINER_CACHEDIR=/scratch/$USER/rb/apptainer-cache
-export APPTAINER_TMPDIR=/scratch/$USER/rb/tmp
-mkdir -p "$IMAGES" "$CACHE" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+# where large files go: your cluster's scratch/work area if it has one (ask your admins or
+# check `echo $SCRATCH $WORK; df -h`), else home if it has a few hundred GB free
+export RB=${SCRATCH:-$HOME}/rb
+export IMAGES=$RB/images                   # .sif images
+export CACHE=$RB/cache                     # Maven/Gradle caches
+export MODELS_ROOT=$RB/models              # model weights
+export APPTAINER_CACHEDIR=$RB/apptainer-cache
+export APPTAINER_TMPDIR=$RB/tmp
+mkdir -p "$IMAGES" "$CACHE" "$MODELS_ROOT" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
 
-# optional: test the whole pipeline with stand-ins (needs root or user namespaces)
+# if scripts say "Permission denied", the executable bits were lost (e.g. web upload):
+chmod +x command_run_gold.sh scripts/*.sh scripts/*.py agent/agent.py tests/e2e_fake.sh tests/fake/apptainer tests/fake/bin/mvn tests/fake/model_server.py
+
+# optional: test the whole pipeline with stand-ins (no Apptainer, Maven or GPU needed)
 tests/e2e_fake.sh                          # ends with: ALL E2E CHECKS PASSED
 ```
 
@@ -67,7 +73,7 @@ RB_DELETE_IMAGE=0 scripts/run_gold.sh out "$IMAGES" "$CACHE" google__gson-2337
 cat out/eval_logs/google__gson-2337_result.json          # want "resolved": true
 
 # 3. start one model (GPU node), once the weights and vLLM image exist (see below)
-VLLM_SIF="$IMAGES/vllm.sif" MODELS_ROOT=/scratch/$USER/rb/models \
+VLLM_SIF="$IMAGES/vllm.sif" \
     scripts/serve_model.sh qwen3-coder-next 8000 1 &
 
 # 4. agent + evaluation on that task
@@ -81,7 +87,6 @@ Model weights and the vLLM image, once:
 
 ```bash
 pip install -U "huggingface_hub[cli]"
-export MODELS_ROOT=/scratch/$USER/rb/models
 scripts/download_models.sh                                # the four models
 apptainer build --fakeroot --build-arg VLLM_VERSION=v0.11.0 "$IMAGES/vllm.sif" environments/vllm.def
 ```
@@ -132,6 +137,8 @@ Every step skips work already done, so you can stop and restart at any time.
 
 | Symptom | Look at | Usual cause |
 |---|---|---|
+| `Permission denied` running a script | `ls -l scripts/` | executable bits lost: run the `chmod +x` line from Install |
+| `mkdir: cannot create directory '/scratch'` | `echo $SCRATCH` | no `/scratch` on this cluster: set `RB` to a path that exists |
 | `PULL FAILED` | `$IMAGES/tasks/<id>.sif.pull.log` | no access to `ghcr.io` / Docker Hub from this node |
 | gold check `oracle_no_test_results` | `<task>/validation/oracle-*-1.log` | build failed offline: missing dependency, wrong JDK |
 | `WARNING ... no Maven/Gradle cache` | pull output | `/root` unreadable in the image and `--fakeroot` not allowed |
