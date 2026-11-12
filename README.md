@@ -183,7 +183,8 @@ IMAGES=/scratch/images CACHE=/scratch/cache ./command_run_gold.sh      # after s
 
 With `RB_DELETE_IMAGE=1` only one image is on disk at a time, but Stages 2/3 will pull it
 again. Use `RB_DELETE_IMAGE=0` if you have the space. To run the lines in parallel, e.g.
-`grep run_gold command_run_gold.sh | parallel -j 4` (each instance uses its own folders).
+`export OUT=out IMAGES=... CACHE=... RB_DELETE_IMAGE=1; grep "^scripts/run_gold" command_run_gold.sh | parallel -j 4`
+(each instance uses its own folders).
 
 ## Relation to SWE-PolyBench / TDD-Bench's harness
 
