@@ -1,224 +1,142 @@
-# TDD-Bench-Java → RepairBench (Apptainer only)
+# TDD-Bench-Java → RepairBench
 
-Turns the 250 TDD-Bench-Java instances (`data/java.csv`) into repair tasks for the Java
-extension of the C/C++ pipeline, and runs four open LLMs from Hugging Face on them in the
-three stages of the plan. **Everything runs in Apptainer; no Docker daemon is needed.**
-
-TDD-Bench originally asks a model to write *tests*. Here the same PRs are used the
-RepairBench way: the model gets the issue and the code at the base commit and writes the
-*fix*; the PR's tests stay hidden and score it.
+Runs open LLMs on the 250 Java bug-fix tasks of
+[TDD-Bench-Java](https://github.com/IBM/TDD-Bench-Verified) the RepairBench way: the
+model gets the issue and the code at the base commit and writes the **fix**; the PR's
+tests stay hidden and decide whether it is resolved. This is the Java extension of the
+C/C++ pipeline. **Everything runs in Apptainer; no Docker daemon is needed.**
 
 ```
-Stage 1  Setup (network ON)      tasks, bundles, images, dependency caches, ORACLE/BASE validation
-Stage 2  Patch creation (OFF)    open LLM + agent loop; every command in an offline Apptainer instance
-Stage 3  Evaluation (OFF)        candidate.patch + hidden test.patch on a fresh base -> resolved?
+Stage 1  Setup         network ON    task folders, images, dependency caches, gold check
+Stage 2  Patch         network OFF   open LLM + agent in a sealed Apptainer instance
+Stage 3  Evaluation    network OFF   candidate patch + hidden tests -> resolved or not
 ```
 
-## Two runtimes, same scripts (`RB_RUNTIME`)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Run everything](#run-everything)
+- [Where the results are](#where-the-results-are)
+- [Troubleshooting](#troubleshooting)
+- Further docs: [How it works](docs/PIPELINE.md) · [Reference](docs/REFERENCE.md) ·
+  [Relation to TDD-Bench / SWE-PolyBench](docs/TDD_BENCH.md)
 
-| | `built` (default) | `frozen` |
-|---|---|---|
-| Image | ours: `environments/java.def`, one per JDK (8, 11, 17, 21) | one per task: SWE-PolyBench / Multi-SWE-bench images, pulled with `apptainer pull docker://...` |
-| Dependencies | one shared cache made by `warm_dependencies.sh` | each image's own Maven/Gradle cache, extracted once |
-| JDK choice | stated, else inferred; ORACLE-first search over JDKs | whatever the image was built with |
-| Use when | you want full control of the runtime (as for C/C++) | you want the environments IBM/Amazon already verified |
+## Requirements
 
-Both run the same validation, agent, leak self-test and evaluation code.
-
-## Layout
-
-```
-data/java.csv                  TDD-Bench-Java (IBM, Apache-2.0, see data/LICENSE-TDD-Bench)
-configs/models.json            the four Hugging Face models and their vLLM flags
-environments/java.def          JDK image (build arg JDK=8|11|17|21; Temurin, Maven 3.9.9, Gradle 8.10.2)
-environments/vllm.def          vLLM model server image
-agent/agent.py                 agent loop for an OpenAI-compatible server (bash, str_replace, write_file, finish)
-command_run_gold.sh            gold check of all 250 instances, one line each (like TDD-Bench)
-scripts/prepare_all.sh         Stage 1a: convert + check patches + infer JDKs + bundles
-scripts/build_images.sh        Stage 1b (built): build JDK and vLLM images, record SHA256
-scripts/pull_task_images.sh    Stage 1b (frozen): pull per-task images, extract their caches
-scripts/stage1_all.sh          Stage 1c: warm-up (built) + ORACLE/BASE validation for many tasks
-scripts/run_agent.sh           Stage 2: one model on one task, offline, with leak self-test
-scripts/evaluate_candidate.sh  Stage 3: score one candidate.patch
-scripts/run_experiment.sh      Stages 2+3 for a model over a task list (resumable)
-scripts/summarize.py           metrics.json + STATS.md (Pass@1 per model, per repo)
-scripts/download_models.sh     fetch the four models to shared storage
-scripts/serve_model.sh         one offline vLLM server per GPU node
-tests/e2e_fake.sh              runs the whole pipeline on a synthetic task with fakes (see Tests)
-```
-
-Helpers: `convert_tddbench.py`, `normalize_patches.py`, `detect_jdk.py`, `make_bundles.sh`,
-`warm_dependencies.sh`, `validate_task.sh`, `leak_selftest.sh`, `parse_junit.py`, `lib.sh`.
-
-## Stage 1 — Setup (network node)
-
-```bash
-# a) tasks: CSV -> task folders; patches checked at base; JDK inferred; one bundle per task
-scripts/prepare_all.sh out                       # all 13 repos, 250 tasks
-scripts/prepare_all.sh out google/gson           # or some repos only
-
-# b) images, EITHER built ...
-scripts/build_images.sh "$AI4I_ROOT/singularity/images" out
-#    ... OR frozen (per-task images from the SWE-PolyBench / Multi-SWE-bench registries)
-RB_RUNTIME=frozen scripts/pull_task_images.sh out "$AI4I_ROOT/singularity/images" "$AI4I_ROOT/cache/java"
-
-# c) dependencies + validation (ORACLE first, then BASE, 3 repetitions each)
-scripts/stage1_all.sh out "$AI4I_ROOT/singularity/images" "$AI4I_ROOT/cache/java"                    # built
-RB_RUNTIME=frozen scripts/stage1_all.sh out "$AI4I_ROOT/singularity/images" "$AI4I_ROOT/cache/java"  # frozen
-```
-
-If compute nodes have no network: `ONLY_PREPARE=1` on a network node, then
-`ONLY_VALIDATE=1` on compute nodes. Validation is always offline.
-
-Per task (`out/exports/<repo>/<instance_id>/`):
-
-| File | Model sees it? | Used by |
-|---|---|---|
-| `problem_statement.md` | yes | agent |
-| `repo.bundle` | yes, as the workspace (no remote; one commit by default) | all stages |
-| `test.patch` | no | validation, evaluation |
-| `gold.patch` | no | ORACLE validation only |
-| `metadata.json` | no | harness: base commit, JDK, build tool, test classes, offline test command, images, flags |
-| `validation/verdict.json` | no | frozen profile + fail-to-pass / pass-to-pass lists for evaluation |
-
-Verdicts: `valid_fail_to_pass` (goes to the agent), `bug_not_reproduced`, `oracle_failed`,
-`oracle_no_test_results` (build/environment problem), `unstable`. The list of valid tasks
-is written to `out/validated_tasks.txt`.
-
-### What the conversion does
-
-- **Problem statement:** issue text only, duplicated copies removed; `hints_text` is kept in
-  `metadata.json` and never shown to the model.
-- **Tests:** test classes come from the files in `test.patch` (by name, or by `@Test`-style
-  markers for names like `Issue2096`); helper classes, `.sql` and `.proto` files are not run.
-- **Offline test command,** e.g. `mvn -o -B clean verify -pl gson -am -Dtest=JsonReaderTest ...`,
-  or `gradle --offline --continue :module:test --tests <FQCN>` (the wrapper is used if present).
-- **JDK:** from the SWE-PolyBench Dockerfile (8 or 11); for the 93 Multi-SWE-bench rows it is
-  inferred from the build files at the base commit (e.g. Mockito → 11 from
-  `gradle/java-library.gradle`, Gradle wrapper version caps the newest usable JDK) and
-  flagged `jdk_inferred`. Validation still tries other JDKs if ORACLE fails.
-- **Patches:** about 1 in 7 lost whitespace or CRLF endings in the CSV; they are re-created
-  from the real repository (`*.orig.patch` keeps the CSV version). Still failing →
-  `patch_does_not_apply`, skipped.
-- **Upstream F2P/P2P** lists are kept for comparison only; ours come from validation.
-- **Review flags:** `likely_in_training_data` (all dated tasks are 2016–2024), `date_unknown`,
-  `jdk_inferred`, `no_test_class_detected`, `gradle_task_paths_need_review`,
-  `test_patch_touches_main_sources`, `gold_over_1000_lines`, `gold_over_20_files`,
-  `problem_statement_short`, `touches_android_variant`, `patch_does_not_apply`.
-
-## Stage 2 — Patch creation (network OFF for the model)
-
-Models (`configs/models.json`), four vendors, all open weights on Hugging Face:
-
-| Name | Hugging Face repo |
+| Needed for | What |
 |---|---|
-| qwen3-coder-next | `Qwen/Qwen3-Coder-Next` |
-| gpt-oss-120b | `openai/gpt-oss-120b` |
-| devstral-small | `mistralai/Devstral-Small-2507` |
-| glm-4.7-flash | `zai-org/GLM-4.7-Flash` |
+| everything | Linux x86_64, bash, git, Python ≥ 3.9 (standard library only) |
+| containers | Apptainer ≥ 1.2 (≥ 1.1 if you only use the frozen images) |
+| Stage 1 | network to GitHub, `ghcr.io` and Docker Hub (images are pulled by Apptainer) |
+| Stage 2 | GPU node; `huggingface_hub` CLI and network to Hugging Face once, for the weights |
+| disk | scratch space: images are 1–5 GB per task, model weights hundreds of GB in total |
 
 ```bash
-MODELS_ROOT=/shared/models scripts/download_models.sh                       # network node, once
-MODELS_ROOT=/shared/models VLLM_SIF=$AI4I_ROOT/singularity/images/vllm.sif \
-    scripts/serve_model.sh qwen3-coder-next 8000 1 &                           # GPU node
-scripts/run_experiment.sh qwen3-coder-next http://127.0.0.1:8000/v1 out/validated_tasks.txt \
-    out "$AI4I_ROOT/singularity/images" "$AI4I_ROOT/cache/java" runs           # add RB_RUNTIME=frozen if used
+apptainer --version && git --version && python3 --version
 ```
 
-Repeat per model (one vLLM server at a time per node), with the same budget
-(`RB_MAX_STEPS`, `RB_MAX_SECONDS`) and history profile (`RB_HISTORY=none` default, `base`
-for the pre-base-history run).
+## Install
 
-For each task, `run_agent.sh`:
-1. builds a fresh workspace from `repo.bundle`: no remote, a single commit (or the history up
-   to base only with `RB_HISTORY=base`);
-2. starts an Apptainer instance with `--net --network none --containall` on the profile
-   frozen by validation; the dependency cache is mounted read-only, Maven/Gradle are forced
-   offline (`MAVEN_ARGS=-o`, a Gradle init script), and for frozen images an empty directory
-   is mounted over the image's own repo copy so its git history can't be read;
-3. runs the **leak self-test** inside the instance: TCP to Maven Central and GitHub, DNS,
-   curl, an online Maven download and `git fetch` must all fail; no git remote; one commit;
-   image repo copy hidden. If any check fails, the agent is not started;
-4. runs `agent/agent.py`: the harness talks to vLLM from outside; every tool call (bash,
-   file edits) runs inside the instance;
-5. saves `candidate.patch` (the full workspace diff), `trajectory.jsonl`, `agent.json`,
-   `selftest.json`, `run.json` (model, runtime, image SHA256, budget, stop reason).
-
-## Stage 3 — Evaluation (network OFF)
-
-`evaluate_candidate.sh` (called by `run_experiment.sh`): fresh base checkout → apply
-`candidate.patch` → restore the files `test.patch` touches (SWE-bench convention) → apply
-`test.patch` → run the task's tests on the frozen profile → **resolved** iff every
-fail-to-pass and every pass-to-pass test passes.
-
-Outcomes counted in Pass@1: `resolved`, `unresolved`, `patch_apply_failed`, `empty_patch`.
-Kept missing (never counted as failures): `missing_validation`, `missing_candidate`,
-`eval_no_test_results`.
+Nothing to compile or `pip install` for the pipeline itself.
 
 ```bash
-python3 scripts/summarize.py out runs     # runs/metrics.json + runs/STATS.md
+unzip tddbench-java-repairbench.zip        # or: git clone <your copy of this repo>
+cd tddbench-java-repairbench
+
+# where large files go (use scratch, not home)
+export IMAGES=/scratch/$USER/rb/images     # .sif images
+export CACHE=/scratch/$USER/rb/cache       # Maven/Gradle caches
+export APPTAINER_CACHEDIR=/scratch/$USER/rb/apptainer-cache
+export APPTAINER_TMPDIR=/scratch/$USER/rb/tmp
+mkdir -p "$IMAGES" "$CACHE" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+
+# optional: test the whole pipeline with stand-ins (needs root or user namespaces)
+tests/e2e_fake.sh                          # ends with: ALL E2E CHECKS PASSED
 ```
 
-Pass@1 per model over all validated tasks, over the tasks every model was scored on, and
-per repository (the Java slice).
+## Quick start
 
-## Gold check per instance (same shape as TDD-Bench's `command_run_gold.sh`)
-
-`command_run_gold.sh` has one line per instance, all 250, in IBM's order:
+One repository, one task, end to end.
 
 ```bash
-IMAGES=/scratch/images CACHE=/scratch/cache ./command_run_gold.sh      # after scripts/prepare_all.sh out
-# each line:  scripts/run_gold.sh out $IMAGES $CACHE <instance_id>
+# 1. prepare the gson tasks (network node)
+scripts/prepare_all.sh out google/gson
+
+# 2. gold check of one task: old code fails, real fix passes (pulls its image)
+RB_DELETE_IMAGE=0 scripts/run_gold.sh out "$IMAGES" "$CACHE" google__gson-2337
+cat out/eval_logs/google__gson-2337_result.json          # want "resolved": true
+
+# 3. start one model (GPU node), once the weights and vLLM image exist (see below)
+VLLM_SIF="$IMAGES/vllm.sif" MODELS_ROOT=/scratch/$USER/rb/models \
+    scripts/serve_model.sh qwen3-coder-next 8000 1 &
+
+# 4. agent + evaluation on that task
+echo google__gson-2337 > one.txt
+RB_RUNTIME=frozen scripts/run_experiment.sh qwen3-coder-next http://127.0.0.1:8000/v1 \
+    one.txt out "$IMAGES" "$CACHE" runs
+cat runs/qwen3-coder-next/google__gson-2337/result.json  # "outcome": "resolved" or not
 ```
 
-| TDD-Bench (`run_evaluation.py`) | here (`run_gold.sh`, Apptainer) |
+Model weights and the vLLM image, once:
+
+```bash
+pip install -U "huggingface_hub[cli]"
+export MODELS_ROOT=/scratch/$USER/rb/models
+scripts/download_models.sh                                # the four models
+apptainer build --fakeroot --build-arg VLLM_VERSION=v0.11.0 "$IMAGES/vllm.sif" environments/vllm.def
+```
+
+## Run everything
+
+```bash
+# Stage 1: all 250 tasks
+scripts/prepare_all.sh out
+RB_DELETE_IMAGE=0 OUT=out ./command_run_gold.sh           # gold check, one line per instance
+python3 scripts/score_gold.py out                         # -> out/validated_tasks.txt
+
+# Stages 2 + 3: each of the four models
+for M in qwen3-coder-next gpt-oss-120b devstral-small glm-4.7-flash; do
+  scripts/serve_model.sh "$M" 8000 1 &
+  until curl -sf http://127.0.0.1:8000/v1/models >/dev/null; do sleep 10; done
+  RB_RUNTIME=frozen scripts/run_experiment.sh "$M" http://127.0.0.1:8000/v1 \
+      out/validated_tasks.txt out "$IMAGES" "$CACHE" runs
+  kill %1; wait
+done
+
+# Results
+python3 scripts/summarize.py out runs                     # runs/STATS.md, runs/metrics.json
+```
+
+Every step skips work already done, so you can stop and restart at any time.
+
+- **No network on compute nodes:** pull first on a network node
+  (`scripts/pull_task_images.sh out "$IMAGES" "$CACHE"`), then run the rest on compute nodes.
+- **In parallel:** split the task list (`split -n l/8 out/validated_tasks.txt part_`) and give
+  each job its own part with the same `runs/` folder; the gold-check lines can also run in
+  parallel (see [Reference](docs/REFERENCE.md#parallel-runs)).
+- **Little disk:** `RB_DELETE_IMAGE=1` keeps one image at a time in the gold check, but Stages
+  2/3 then pull each image again.
+
+## Where the results are
+
+| What | Where |
 |---|---|
-| `--instance_id_to_run <id>` | last argument |
-| pull image from GHCR / `mswebench` with Docker | `apptainer pull docker://...` → `.sif` |
-| run tests before and after the gold patch | ORACLE (gold + tests) and BASE (tests) offline, ×3 |
-| `eval_logs/<id>_result.json` with `resolved` | same file and field, plus verdict and F2P list |
-| `--skip-existing` | an existing result is skipped |
-| `--delete-image` | `RB_DELETE_IMAGE=1` (default in `command_run_gold.sh`) |
-| `--score-only` → `scoring_results.json` | `scripts/score_gold.py out` (also writes `validated_tasks.txt`) |
+| task folders | `out/exports/<repo>/<instance_id>/` (issue, hidden patches, metadata, bundle) |
+| overview of the tasks | `out/SUMMARY.md`, `out/manifest.json` |
+| gold check per task | `out/eval_logs/<id>_result.json`, details in `<task>/validation/` |
+| gold check summary | `out/eval_logs/scoring_results.json`, `out/validated_tasks.txt` |
+| one agent run | `runs/<model>/<id>/`: `candidate.patch`, `trajectory.jsonl`, `selftest.json`, `result.json` |
+| final numbers | `runs/STATS.md`, `runs/metrics.json` (Pass@1 per model, per repository) |
 
-With `RB_DELETE_IMAGE=1` only one image is on disk at a time, but Stages 2/3 will pull it
-again. Use `RB_DELETE_IMAGE=0` if you have the space. To run the lines in parallel, e.g.
-`export OUT=out IMAGES=... CACHE=... RB_DELETE_IMAGE=1; grep "^scripts/run_gold" command_run_gold.sh | parallel -j 4`
-(each instance uses its own folders).
+## Troubleshooting
 
-## Relation to SWE-PolyBench / TDD-Bench's harness
+| Symptom | Look at | Usual cause |
+|---|---|---|
+| `PULL FAILED` | `$IMAGES/tasks/<id>.sif.pull.log` | no access to `ghcr.io` / Docker Hub from this node |
+| gold check `oracle_no_test_results` | `<task>/validation/oracle-*-1.log` | build failed offline: missing dependency, wrong JDK |
+| `WARNING ... no Maven/Gradle cache` | pull output | `/root` unreadable in the image and `--fakeroot` not allowed |
+| run status `leak_selftest_failed` | `runs/<model>/<id>/selftest.json` | the sandbox could reach the network or the image's repo copy |
+| agent `model_server_error` | `runs/<model>/<id>/trajectory.jsonl` | vLLM not up, wrong port or model name |
+| agent never calls tools | trajectory | tool-parser flag for that model in `configs/models.json` |
 
-TDD-Bench's `command_run_gold.sh` runs IBM's patched SWE-PolyBench harness
-(`tdd_java.diff` on commit `1963184`). That harness needs a Docker daemon (Python `docker`
-SDK), and in IBM's version `model_patch` is a *test* patch. Here:
-
-- the same per-instance images are used through Apptainer (`RB_RUNTIME=frozen`): GHCR
-  `ghcr.io/timesler/swe-polybench.eval.x86_64.<id>` (pinned `:v1.1`, falling back to the
-  `:latest` tag IBM uses) and Docker Hub `mswebench/...:pr-<n>` for the Multi-SWE-bench rows;
-- their gold check (old code vs. gold + tests) corresponds to our ORACLE/BASE validation
-  (`stage1_all.sh`), run offline and repeated 3 times;
-- their scoring of a model's *test* patch is replaced by scoring a model's *fix* against
-  the hidden tests (Stage 3).
-
-## Tests
-
-```bash
-tests/e2e_fake.sh
-```
-
-Runs the full pipeline (validation ×3 → agent with leak self-test → evaluation of a
-correct, a wrong and an empty patch → metrics) for both runtimes on a synthetic Java task,
-using a fake `apptainer` (real bind mounts and a real empty network namespace via
-`unshare`), a fake `mvn` and a scripted model server. Needs root or unprivileged user
-namespaces. This passes in the environment where the repo was written.
-
-## Not yet run against the real stack
-
-No real Apptainer, Maven Central, registries or GPUs were reachable where this was written.
-Checked for real: the conversion of all 250 rows, bundles and patch checks for all 34 gson
-tasks, JDK inference on jackson-core and Mockito, and the whole pipeline logic through
-`tests/e2e_fake.sh`. On the first real task, expect to adjust: image build details
-(Adoptium/Maven URLs), vLLM tool-parser flags for your vLLM version, cache extraction from
-frozen images (`/root` permissions; `--fakeroot` is tried first), and Gradle task paths for
-multi-project builds (`gradle_task_paths_need_review`). Check GLM-4.7-Flash's licence and
-size on its model card.
+What has and has not been run yet is listed in [docs/PIPELINE.md](docs/PIPELINE.md#status).
