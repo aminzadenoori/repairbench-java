@@ -1,8 +1,73 @@
+diff --git a/README.md b/README.md
+index a9ccb82..5a6c48e 100644
+--- a/README.md
++++ b/README.md
+@@ -140,6 +140,7 @@ Every step skips work already done, so you can stop and restart at any time.
+ | anything at the start | `scripts/check_setup.sh` | it names the missing tool, permission or site |
+ | `Permission denied` running a script | `ls -l scripts/` | executable bits lost: run the `chmod +x` line the check prints |
+ | `PULL FAILED` | `$IMAGES/tasks/<id>.sif.pull.log` | no access to `ghcr.io` / Docker Hub from this node |
++| pull fails with `unpack entry ... invalid argument` | the same log | `APPTAINER_TMPDIR` is on a network file system that rejects names like `:.1.gz`; use local disk: `export APPTAINER_TMPDIR=/tmp/$USER/apptainer-tmp` |
+ | gold check `oracle_no_test_results` | `<task>/validation/oracle-*-1.log` | build failed offline: missing dependency, wrong JDK |
+ | `WARNING ... no Maven/Gradle cache` | pull output | `/root` unreadable in the image and `--fakeroot` not allowed |
+ | run status `leak_selftest_failed` | `runs/<model>/<id>/selftest.json` | the sandbox could reach the network or the image's repo copy |
+diff --git a/docs/REFERENCE.md b/docs/REFERENCE.md
+index 61c5c73..8598ef3 100644
+--- a/docs/REFERENCE.md
++++ b/docs/REFERENCE.md
+@@ -40,7 +40,8 @@ Each one is kept if already set. For a first try everything stays inside the rep
+ | `CACHE` | `$RB_WORK/cache` | Maven/Gradle caches |
+ | `MODELS_ROOT` | `$RB_WORK/models` | model weights |
+ | `VLLM_SIF` | `$IMAGES/vllm.sif` | vLLM image |
+-| `APPTAINER_CACHEDIR`, `APPTAINER_TMPDIR` | `$RB_WORK/apptainer-cache`, `$RB_WORK/tmp` | Apptainer's pull cache and temp files |
++| `APPTAINER_CACHEDIR` | `$RB_WORK/apptainer-cache` | Apptainer's download cache |
++| `APPTAINER_TMPDIR` | `/tmp/$USER-rb-apptainer-tmp` | where images are unpacked while pulling; must be a local disk (10–20 GB free) |
+ | `OUT` | `<repo>/out` | task folders, gold-check results |
+ | `RUNS` | `<repo>/runs` | agent runs, evaluation results, metrics |
+ 
+diff --git a/scripts/check_setup.sh b/scripts/check_setup.sh
+index 452e7c4..e17f820 100755
+--- a/scripts/check_setup.sh
++++ b/scripts/check_setup.sh
+@@ -37,6 +37,34 @@ if (( FREE >= 300 )); then ok "free disk at $RB_WORK: ${FREE} GB"
+ elif (( FREE >= 10 )); then warn "free disk at $RB_WORK: ${FREE} GB (enough for a first try with a few tasks)" \
+   "all 250 frozen images + the 4 models need several hundred GB; later set RB_WORK to a bigger disk"
+ else fail "only ${FREE} GB free at $RB_WORK" "set RB_WORK to a disk with more space and re-source scripts/env.sh"; fi
++# Apptainer unpacks image layers in APPTAINER_TMPDIR; real images contain names like ":.1.gz"
++# that some network file systems reject ("invalid argument" during the pull).
++NAMES_OK=$(python3 - "$APPTAINER_TMPDIR" <<'EOF'
++import os, sys, tempfile
++d = tempfile.mkdtemp(dir=sys.argv[1])
++bad = []
++for n in [":.1.gz", "a:b", "x?y", "back\\slash", "trail.", "CON"]:
++    try:
++        open(os.path.join(d, n), "w").close()
++    except OSError:
++        bad.append(n)
++for n in os.listdir(d):
++    os.unlink(os.path.join(d, n))
++os.rmdir(d)
++print(" ".join(bad))
++EOF
++)
++TFREE=$(python3 -c 'import shutil,sys; print(shutil.disk_usage(sys.argv[1]).free // 2**30)' "$APPTAINER_TMPDIR" 2>/dev/null || echo 0)
++if [[ -n $NAMES_OK ]]; then
++  fail "APPTAINER_TMPDIR=$APPTAINER_TMPDIR rejects file names used inside images: $NAMES_OK" \
++       "pulls fail with 'invalid argument'; use a local disk: export APPTAINER_TMPDIR=/tmp/\$USER/apptainer-tmp"
++  need frozen no
++elif (( TFREE < 10 )); then
++  warn "only ${TFREE} GB free in APPTAINER_TMPDIR=$APPTAINER_TMPDIR (images are unpacked there while pulling)" \
++       "pick a local disk with 10-20 GB free: export APPTAINER_TMPDIR=<dir>"
++else
++  ok "APPTAINER_TMPDIR=$APPTAINER_TMPDIR accepts image file names, ${TFREE} GB free"
++fi
+ if have unshare && unshare -rn true 2>/dev/null; then ok "user namespaces allowed (tests/e2e_fake.sh can cut the network)"
+ else warn "user namespaces not allowed for this user" "tests/e2e_fake.sh will run, but its leak self-test check fails on purpose"; fi
+ 
 diff --git a/scripts/env.sh b/scripts/env.sh
-index e6f5c8a..6ee1cf1 100755
+index e6f5c8a..89399f8 100755
 --- a/scripts/env.sh
 +++ b/scripts/env.sh
-@@ -3,18 +3,31 @@
+@@ -3,18 +3,34 @@
  # For a first try everything lives in ./work inside the repository. To put the large files
  # (images, caches, model weights) somewhere else later, set RB_WORK before sourcing:
  #   RB_WORK=/big/disk/rb source scripts/env.sh
@@ -33,7 +98,10 @@ index e6f5c8a..6ee1cf1 100755
 +_rb_dir CACHE "$RB_WORK/cache"                     # Maven/Gradle caches
 +_rb_dir MODELS_ROOT "$RB_WORK/models"              # model weights
 +_rb_dir APPTAINER_CACHEDIR "$RB_WORK/apptainer-cache"
-+_rb_dir APPTAINER_TMPDIR "$RB_WORK/tmp"
++# Apptainer unpacks images here while pulling. Keep it on a LOCAL disk: network file
++# systems (e.g. some home/NFS/SMB mounts) reject file names such as ":.1.gz" that real
++# images contain, and the pull then fails with "invalid argument".
++_rb_dir APPTAINER_TMPDIR "${TMPDIR:-/tmp}/${USER:-rb}-rb-apptainer-tmp"
 +_rb_dir OUT "$RB_REPO/out"                         # task folders
 +_rb_dir RUNS "$RB_REPO/runs"                       # agent runs and results
  export VLLM_SIF=${VLLM_SIF:-$IMAGES/vllm.sif}
