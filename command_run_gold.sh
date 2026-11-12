@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Gold check of all 250 TDD-Bench-Java instances, one command each, in the same order as
-# TDD-Bench's command_run_gold.sh. Apptainer only. Set IMAGES and CACHE to scratch paths.
-# RB_DELETE_IMAGE=1 frees the disk after each instance (like --delete-image).
+# TDD-Bench's command_run_gold.sh. Apptainer only.
+#   ./command_run_gold.sh            (paths come from scripts/env.sh: ./work, ./out)
+# RB_DELETE_IMAGE=1 deletes each image after its check (like --delete-image); the default
+# here keeps them, because Stages 2-3 need them again.
 set -u
 cd "$(dirname "$0")"
-OUT=${OUT:-out} IMAGES=${IMAGES:?set IMAGES} CACHE=${CACHE:?set CACHE}
-export RB_DELETE_IMAGE=${RB_DELETE_IMAGE:-1}
+. scripts/env.sh
+export RB_DELETE_IMAGE=${RB_DELETE_IMAGE:-}
 scripts/run_gold.sh "$OUT" "$IMAGES" "$CACHE" fasterxml__jackson-databind-3701
 scripts/run_gold.sh "$OUT" "$IMAGES" "$CACHE" mockito__mockito-3167
 scripts/run_gold.sh "$OUT" "$IMAGES" "$CACHE" mockito__mockito-3424

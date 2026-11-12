@@ -29,98 +29,98 @@ Stage 3  Evaluation    network OFF   candidate patch + hidden tests -> resolved 
 | containers | Apptainer ≥ 1.2 (≥ 1.1 if you only use the frozen images) |
 | Stage 1 | network to GitHub, `ghcr.io` and Docker Hub (images are pulled by Apptainer) |
 | Stage 2 | GPU node; `huggingface_hub` CLI and network to Hugging Face once, for the weights |
-| disk | scratch space: images are 1–5 GB per task, model weights hundreds of GB in total |
+| disk | a few GB per task for a first try; several hundred GB for all 250 tasks + 4 models |
 
-```bash
-apptainer --version && git --version && python3 --version
-```
+`scripts/check_setup.sh` checks all of this for you (next section).
 
 ## Install
 
 Nothing to compile or `pip install` for the pipeline itself.
 
 ```bash
-unzip tddbench-java-repairbench.zip        # or: git clone <your copy of this repo>
-cd tddbench-java-repairbench
+git clone <your copy of this repo> repairbench-java && cd repairbench-java
 
-# where large files go: your cluster's scratch/work area if it has one (ask your admins or
-# check `echo $SCRATCH $WORK; df -h`), else home if it has a few hundred GB free
-export RB=${SCRATCH:-$HOME}/rb
-export IMAGES=$RB/images                   # .sif images
-export CACHE=$RB/cache                     # Maven/Gradle caches
-export MODELS_ROOT=$RB/models              # model weights
-export APPTAINER_CACHEDIR=$RB/apptainer-cache
-export APPTAINER_TMPDIR=$RB/tmp
-mkdir -p "$IMAGES" "$CACHE" "$MODELS_ROOT" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
-
-# if scripts say "Permission denied", the executable bits were lost (e.g. web upload):
-chmod +x command_run_gold.sh scripts/*.sh scripts/*.py agent/agent.py tests/e2e_fake.sh tests/fake/apptainer tests/fake/bin/mvn tests/fake/model_server.py
-
-# optional: test the whole pipeline with stand-ins (no Apptainer, Maven or GPU needed)
-tests/e2e_fake.sh                          # ends with: ALL E2E CHECKS PASSED
+source scripts/env.sh          # default paths: everything inside this folder (work/, out/, runs/)
+scripts/check_setup.sh         # checks tools, permissions, disk, GitHub, GHCR, Docker Hub,
+                               # Hugging Face, Apptainer (pull, bind, --network none, instances)
 ```
+
+Run `source scripts/env.sh` in every new shell. The check prints `OK` / `WARN` / `FAIL`
+with a hint for each problem, and at the end which stages are ready. Fix the `FAIL` lines
+first. Typical ones:
+
+| Check says | Do this |
+|---|---|
+| scripts are not executable | run the `chmod +x ...` line it prints (happens after a web upload) |
+| GHCR / Docker Hub not reachable | ask whether `ghcr.io` and `registry-1.docker.io` are allowed from this node, or use another node |
+| `--network none` not allowed | ask the admins to allow it (`allow net networks` in `apptainer.conf`); Stages 2–3 need it |
+| apptainer not found | `module load apptainer` (or `singularity`) |
+| Hugging Face needs a login | accept the model licence on the website, then `hf auth login` |
+
+Large files go to `work/` inside the repo by default, which is fine for a first try. When
+you scale up, put them on a bigger disk with `RB_WORK=/big/disk/rb source scripts/env.sh`.
+
+Optional: `tests/e2e_fake.sh` runs the whole pipeline on a synthetic task with stand-ins
+(no Apptainer, Maven or GPU needed) and ends with `ALL E2E CHECKS PASSED`.
 
 ## Quick start
 
-One repository, one task, end to end.
+One repository, one task, end to end. Run `source scripts/env.sh` first.
 
 ```bash
 # 1. prepare the gson tasks (network node)
-scripts/prepare_all.sh out google/gson
+scripts/prepare_all.sh "$OUT" google/gson
 
 # 2. gold check of one task: old code fails, real fix passes (pulls its image)
-RB_DELETE_IMAGE=0 scripts/run_gold.sh out "$IMAGES" "$CACHE" google__gson-2337
-cat out/eval_logs/google__gson-2337_result.json          # want "resolved": true
+scripts/run_gold.sh "$OUT" "$IMAGES" "$CACHE" google__gson-2337
+cat "$OUT/eval_logs/google__gson-2337_result.json"        # want "resolved": true
 
-# 3. start one model (GPU node), once the weights and vLLM image exist (see below)
-VLLM_SIF="$IMAGES/vllm.sif" \
-    scripts/serve_model.sh qwen3-coder-next 8000 1 &
+# 3. the model, once: weights + vLLM image, then start the server (GPU node)
+pip install -U "huggingface_hub[cli]"
+scripts/download_models.sh qwen3-coder-next
+apptainer build --fakeroot --build-arg VLLM_VERSION=v0.11.0 "$VLLM_SIF" environments/vllm.def
+scripts/serve_model.sh qwen3-coder-next 8000 1 &
 
 # 4. agent + evaluation on that task
 echo google__gson-2337 > one.txt
 RB_RUNTIME=frozen scripts/run_experiment.sh qwen3-coder-next http://127.0.0.1:8000/v1 \
-    one.txt out "$IMAGES" "$CACHE" runs
-cat runs/qwen3-coder-next/google__gson-2337/result.json  # "outcome": "resolved" or not
-```
-
-Model weights and the vLLM image, once:
-
-```bash
-pip install -U "huggingface_hub[cli]"
-scripts/download_models.sh                                # the four models
-apptainer build --fakeroot --build-arg VLLM_VERSION=v0.11.0 "$IMAGES/vllm.sif" environments/vllm.def
+    one.txt "$OUT" "$IMAGES" "$CACHE" "$RUNS"
+cat "$RUNS/qwen3-coder-next/google__gson-2337/result.json"   # "outcome": "resolved" or not
 ```
 
 ## Run everything
 
 ```bash
+source scripts/env.sh
+
 # Stage 1: all 250 tasks
-scripts/prepare_all.sh out
-RB_DELETE_IMAGE=0 OUT=out ./command_run_gold.sh           # gold check, one line per instance
-python3 scripts/score_gold.py out                         # -> out/validated_tasks.txt
+scripts/prepare_all.sh "$OUT"
+./command_run_gold.sh                                     # gold check, one line per instance
+python3 scripts/score_gold.py "$OUT"                      # -> out/validated_tasks.txt
 
 # Stages 2 + 3: each of the four models
+scripts/download_models.sh                                # all four, once
 for M in qwen3-coder-next gpt-oss-120b devstral-small glm-4.7-flash; do
   scripts/serve_model.sh "$M" 8000 1 &
   until curl -sf http://127.0.0.1:8000/v1/models >/dev/null; do sleep 10; done
   RB_RUNTIME=frozen scripts/run_experiment.sh "$M" http://127.0.0.1:8000/v1 \
-      out/validated_tasks.txt out "$IMAGES" "$CACHE" runs
+      "$OUT/validated_tasks.txt" "$OUT" "$IMAGES" "$CACHE" "$RUNS"
   kill %1; wait
 done
 
 # Results
-python3 scripts/summarize.py out runs                     # runs/STATS.md, runs/metrics.json
+python3 scripts/summarize.py "$OUT" "$RUNS"               # runs/STATS.md, runs/metrics.json
 ```
 
 Every step skips work already done, so you can stop and restart at any time.
 
 - **No network on compute nodes:** pull first on a network node
-  (`scripts/pull_task_images.sh out "$IMAGES" "$CACHE"`), then run the rest on compute nodes.
+  (`scripts/pull_task_images.sh "$OUT" "$IMAGES" "$CACHE"`), then run the rest on compute nodes.
 - **In parallel:** split the task list (`split -n l/8 out/validated_tasks.txt part_`) and give
   each job its own part with the same `runs/` folder; the gold-check lines can also run in
   parallel (see [Reference](docs/REFERENCE.md#parallel-runs)).
-- **Little disk:** `RB_DELETE_IMAGE=1` keeps one image at a time in the gold check, but Stages
-  2/3 then pull each image again.
+- **Little disk:** `RB_DELETE_IMAGE=1 ./command_run_gold.sh` keeps one image at a time, but
+  Stages 2/3 then pull each image again.
 
 ## Where the results are
 
@@ -137,8 +137,8 @@ Every step skips work already done, so you can stop and restart at any time.
 
 | Symptom | Look at | Usual cause |
 |---|---|---|
-| `Permission denied` running a script | `ls -l scripts/` | executable bits lost: run the `chmod +x` line from Install |
-| `mkdir: cannot create directory '/scratch'` | `echo $SCRATCH` | no `/scratch` on this cluster: set `RB` to a path that exists |
+| anything at the start | `scripts/check_setup.sh` | it names the missing tool, permission or site |
+| `Permission denied` running a script | `ls -l scripts/` | executable bits lost: run the `chmod +x` line the check prints |
 | `PULL FAILED` | `$IMAGES/tasks/<id>.sif.pull.log` | no access to `ghcr.io` / Docker Hub from this node |
 | gold check `oracle_no_test_results` | `<task>/validation/oracle-*-1.log` | build failed offline: missing dependency, wrong JDK |
 | `WARNING ... no Maven/Gradle cache` | pull output | `/root` unreadable in the image and `--fakeroot` not allowed |

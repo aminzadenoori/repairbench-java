@@ -48,7 +48,7 @@ json.dump([res], open(out, "w"), indent=2)
 print(f"{iid}: {v['verdict']}")
 EOF
 
-if [[ -n ${RB_DELETE_IMAGE:-} && $RB_RUNTIME == frozen ]]; then
+if [[ ${RB_DELETE_IMAGE:-0} == 1 && $RB_RUNTIME == frozen ]]; then
   rm -f "$IMAGES/tasks/$ID.sif" "$IMAGES/tasks/$ID.sif".*
   rm -rf "$CACHE/tasks/$ID"
 fi

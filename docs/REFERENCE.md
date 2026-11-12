@@ -6,8 +6,10 @@
 
 | Script | Stage | What it does |
 |---|---|---|
+| `source scripts/env.sh` | — | default paths (see below); run in every new shell |
+| `scripts/check_setup.sh` | — | checks tools, permissions, disk, network (GitHub, GHCR, Docker Hub, Hugging Face) and Apptainer features; `QUICK=1` skips the test pull |
 | `scripts/prepare_all.sh [out] [repo\|id ...]` | 1 | convert + check patches + infer JDKs + bundles |
-| `command_run_gold.sh` | 1 | gold check of all 250 instances, one line each (env: `OUT`, `IMAGES`, `CACHE`) |
+| `command_run_gold.sh` | 1 | gold check of all 250 instances, one line each (paths from `env.sh`) |
 | `scripts/run_gold.sh out IMAGES CACHE <id>` | 1 | one instance: pull, gold check, `eval_logs/<id>_result.json` |
 | `scripts/score_gold.py out` | 1 | gold-check summary + `validated_tasks.txt` |
 | `scripts/pull_task_images.sh out IMAGES CACHE [repo\|id ...]` | 1 | frozen runtime: pull images, extract caches |
@@ -27,13 +29,28 @@
 Helpers: `convert_tddbench.py`, `normalize_patches.py`, `detect_jdk.py`, `make_bundles.sh`,
 `parse_junit.py`, `lib.sh`.
 
+## Default paths (`scripts/env.sh`)
+
+Each one is kept if already set. For a first try everything stays inside the repository.
+
+| Variable | Default | Holds |
+|---|---|---|
+| `RB_WORK` | `<repo>/work` | the large files below; move them all with `RB_WORK=/big/disk/rb source scripts/env.sh` |
+| `IMAGES` | `$RB_WORK/images` | `.sif` images (`tasks/<id>.sif` for the frozen runtime) |
+| `CACHE` | `$RB_WORK/cache` | Maven/Gradle caches |
+| `MODELS_ROOT` | `$RB_WORK/models` | model weights |
+| `VLLM_SIF` | `$IMAGES/vllm.sif` | vLLM image |
+| `APPTAINER_CACHEDIR`, `APPTAINER_TMPDIR` | `$RB_WORK/apptainer-cache`, `$RB_WORK/tmp` | Apptainer's pull cache and temp files |
+| `OUT` | `<repo>/out` | task folders, gold-check results |
+| `RUNS` | `<repo>/runs` | agent runs, evaluation results, metrics |
+
 ## Environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `RB_RUNTIME` | `built` (`frozen` in `run_gold.sh`) | `frozen` = per-task registry images, `built` = our JDK images |
 | `RB_REPETITIONS` | 3 | ORACLE/BASE repetitions in the gold check |
-| `RB_DELETE_IMAGE` | 1 in `command_run_gold.sh`, else unset | delete each image after its gold check |
+| `RB_DELETE_IMAGE` | unset (keep) | `1` = delete each image after its gold check, like `--delete-image` |
 | `RB_JDK_ORDER` | `11 17 8 21` | built runtime: JDKs to try after the task's own |
 | `RB_HISTORY` | `none` | agent workspace: `none` (one commit) or `base` (history up to base) |
 | `RB_MAX_STEPS` / `RB_MAX_SECONDS` | 100 / 3600 | agent budget per task |
@@ -41,8 +58,6 @@ Helpers: `convert_tddbench.py`, `normalize_patches.py`, `detect_jdk.py`, `make_b
 | `RB_ALLOW_UNVALIDATED` | unset | run the agent on tasks without a valid gold check |
 | `KEEP_WORKSPACE` | unset | keep the agent's workspace for debugging |
 | `ONLY_PREPARE` / `ONLY_VALIDATE` | unset | `stage1_all.sh`: split network and compute parts |
-| `MODELS_ROOT`, `VLLM_SIF` | — | model weights folder, vLLM image |
-| `APPTAINER_CACHEDIR`, `APPTAINER_TMPDIR` | — | put on scratch: pulls are large |
 
 ## Review flags
 
@@ -60,12 +75,12 @@ image folder.
 
 ```bash
 # gold check, 4 at a time
-export OUT=out IMAGES=... CACHE=... RB_DELETE_IMAGE=0
+source scripts/env.sh
 grep "^scripts/run_gold" command_run_gold.sh | parallel -j 4
 
 # agent runs, 8 cluster jobs for one model
 split -n l/8 out/validated_tasks.txt part_
-# job k: scripts/run_experiment.sh <model> <url> part_<k> out $IMAGES $CACHE runs
+# job k: scripts/run_experiment.sh <model> <url> part_<k> "$OUT" "$IMAGES" "$CACHE" "$RUNS"
 ```
 
 ## Disk

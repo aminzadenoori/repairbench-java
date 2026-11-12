@@ -25,8 +25,8 @@ Two things differ here:
 | run tests before and after the gold patch | ORACLE / BASE offline, 3 repetitions |
 | `eval_logs/<id>_result.json` with `resolved` | same file and field, plus verdict and fail-to-pass tests |
 | `--skip-existing` | existing result is skipped |
-| `--delete-image` | `RB_DELETE_IMAGE=1` |
-| `--score-only` → `scoring_results.json` | `scripts/score_gold.py out` |
+| `--delete-image` | `RB_DELETE_IMAGE=1` (off by default: Stages 2–3 reuse the images) |
+| `--score-only` → `scoring_results.json` | `scripts/score_gold.py "$OUT"` |
 
 `command_run_gold.sh` here has the same 250 instances in the same order as IBM's.
 

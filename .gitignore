@@ -1,6 +1,8 @@
-out/
-mirrors/
-mirrors-full/
-cache/
-__pycache__/
 *.pyc
+__pycache__/
+cache/
+mirrors-full/
+mirrors/
+out/
+runs/
+work/
