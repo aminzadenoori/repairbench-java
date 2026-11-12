@@ -3,7 +3,7 @@
 #   RB_RUNTIME=built  : warm dependencies (network ON), then validate (network OFF)
 #   RB_RUNTIME=frozen : pull each task's image + extract its caches (network ON), then validate
 #
-#   [RB_RUNTIME=built|frozen] scripts/stage1_all.sh <out_dir> <images_dir> <cache_dir> [owner/repo ...]
+#   [RB_RUNTIME=built|frozen] scripts/stage1_all.sh <out_dir> <images_dir> <cache_dir> [owner/repo | instance_id ...]
 #
 # Resumable: tasks with validation/verdict.json are skipped (delete it to redo). If compute
 # nodes have no network, run with ONLY_PREPARE=1 on a network node first, then with
@@ -23,7 +23,7 @@ python3 -I - "$OUT/manifest.json" "$@" <<'EOF' |
 import json, sys
 only = set(sys.argv[2:])
 for t in json.load(open(sys.argv[1])):
-    if (not only or t["repository"] in only) and "patch_does_not_apply" not in t["review_flags"]:
+    if (not only or t["repository"] in only or t["instance_id"] in only) and "patch_does_not_apply" not in t["review_flags"]:
         print(t["task_dir"])
 EOF
 while read -r TD; do

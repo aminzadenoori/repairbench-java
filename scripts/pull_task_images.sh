@@ -4,7 +4,7 @@
 # the images straight from the registries (GHCR for SWE-PolyBench, Docker Hub for
 # Multi-SWE-bench).
 #
-#   scripts/pull_task_images.sh <out_dir> <images_dir> <cache_dir> [owner/repo ...]
+#   scripts/pull_task_images.sh <out_dir> <images_dir> <cache_dir> [owner/repo | instance_id ...]
 #
 # Results: <images>/tasks/<instance_id>.sif (+ .sha256)
 #          <cache>/tasks/<instance_id>/{m2,gradle}   (copied from the image's /root)
@@ -19,7 +19,7 @@ python3 -I - "$OUT/manifest.json" "$@" <<'EOF' |
 import json, sys
 only = set(sys.argv[2:])
 for t in json.load(open(sys.argv[1])):
-    if not only or t["repository"] in only:
+    if not only or t["repository"] in only or t["instance_id"] in only:
         print(t["task_dir"])
 EOF
 while read -r TD; do

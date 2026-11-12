@@ -33,6 +33,7 @@ configs/models.json            the four Hugging Face models and their vLLM flags
 environments/java.def          JDK image (build arg JDK=8|11|17|21; Temurin, Maven 3.9.9, Gradle 8.10.2)
 environments/vllm.def          vLLM model server image
 agent/agent.py                 agent loop for an OpenAI-compatible server (bash, str_replace, write_file, finish)
+command_run_gold.sh            gold check of all 250 instances, one line each (like TDD-Bench)
 scripts/prepare_all.sh         Stage 1a: convert + check patches + infer JDKs + bundles
 scripts/build_images.sh        Stage 1b (built): build JDK and vLLM images, record SHA256
 scripts/pull_task_images.sh    Stage 1b (frozen): pull per-task images, extract their caches
@@ -160,6 +161,29 @@ python3 scripts/summarize.py out runs     # runs/metrics.json + runs/STATS.md
 
 Pass@1 per model over all validated tasks, over the tasks every model was scored on, and
 per repository (the Java slice).
+
+## Gold check per instance (same shape as TDD-Bench's `command_run_gold.sh`)
+
+`command_run_gold.sh` has one line per instance, all 250, in IBM's order:
+
+```bash
+IMAGES=/scratch/images CACHE=/scratch/cache ./command_run_gold.sh      # after scripts/prepare_all.sh out
+# each line:  scripts/run_gold.sh out $IMAGES $CACHE <instance_id>
+```
+
+| TDD-Bench (`run_evaluation.py`) | here (`run_gold.sh`, Apptainer) |
+|---|---|
+| `--instance_id_to_run <id>` | last argument |
+| pull image from GHCR / `mswebench` with Docker | `apptainer pull docker://...` → `.sif` |
+| run tests before and after the gold patch | ORACLE (gold + tests) and BASE (tests) offline, ×3 |
+| `eval_logs/<id>_result.json` with `resolved` | same file and field, plus verdict and F2P list |
+| `--skip-existing` | an existing result is skipped |
+| `--delete-image` | `RB_DELETE_IMAGE=1` (default in `command_run_gold.sh`) |
+| `--score-only` → `scoring_results.json` | `scripts/score_gold.py out` (also writes `validated_tasks.txt`) |
+
+With `RB_DELETE_IMAGE=1` only one image is on disk at a time, but Stages 2/3 will pull it
+again. Use `RB_DELETE_IMAGE=0` if you have the space. To run the lines in parallel, e.g.
+`grep run_gold command_run_gold.sh | parallel -j 4` (each instance uses its own folders).
 
 ## Relation to SWE-PolyBench / TDD-Bench's harness
 
