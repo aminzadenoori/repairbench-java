@@ -14,29 +14,35 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 OUT=$(cd "${1:?out_dir}" && pwd); IMAGES=${2:?images_dir}; CACHE=${3:?cache_dir}; shift 3
 mkdir -p "$IMAGES/tasks" "$CACHE/tasks"; IMAGES=$(cd "$IMAGES" && pwd); CACHE=$(cd "$CACHE" && pwd)
+FAILED=0
 
-python3 -I - "$OUT/manifest.json" "$@" <<'EOF' |
+TASKS=$(python3 -I - "$OUT/manifest.json" "$@" <<'EOF'
 import json, sys
 only = set(sys.argv[2:])
 for t in json.load(open(sys.argv[1])):
     if not only or t["repository"] in only or t["instance_id"] in only:
         print(t["task_dir"])
 EOF
+)
 while read -r TD; do
+  [[ -n $TD ]] || continue
   T="$OUT/$TD"; ID=$(task_id "$T")
   REF=$(meta "$T" 'd["environment"].get("frozen_image")')
   SIF="$IMAGES/tasks/$ID.sif"; C="$CACHE/tasks/$ID"
   if [[ ! -s $SIF ]]; then
     # SWE-PolyBench recommends its frozen :v1.1 tags; IBM's TDD-Bench harness pulls :latest.
     # Try the pinned tag first and record which one was used.
-    PULLED=""
+    PULLED=""; : > "$SIF.pull.log"
     for R in "$REF" "${REF%:v1.1}:latest"; do
       echo "pulling $R"
-      if apptainer pull --force "$SIF.tmp" "$R" </dev/null >"$SIF.pull.log" 2>&1; then PULLED=$R; break; fi
+      echo "===== apptainer pull $R" >> "$SIF.pull.log"     # keep every attempt's output
+      if apptainer pull --force "$SIF.tmp" "$R" </dev/null >>"$SIF.pull.log" 2>&1; then PULLED=$R; break; fi
       [[ $R == "${REF%:v1.1}:latest" || $REF != *:v1.1 ]] && break
     done
     if [[ -z $PULLED ]]; then
-      echo "PULL FAILED $ID (see $SIF.pull.log)"; rm -f "$SIF.tmp"; continue
+      echo "PULL FAILED $ID; last lines of $SIF.pull.log:"
+      grep -E 'FATAL|ERROR|error|denied|space|quota' "$SIF.pull.log" | tail -n 6 | sed 's/^/    /'
+      rm -f "$SIF.tmp"; FAILED=$((FAILED + 1)); continue
     fi
     echo "$PULLED" > "$SIF.source"
     mv "$SIF.tmp" "$SIF"; sha256sum "$SIF" | cut -d' ' -f1 > "$SIF.sha256"
@@ -58,4 +64,5 @@ while read -r TD; do
     touch "$C/.done"
     echo "ready $ID  ($(du -sh "$C" | cut -f1) of caches)"
   fi
-done
+done <<< "$TASKS"
+(( FAILED == 0 )) || { echo "$FAILED image(s) failed to pull"; exit 1; }

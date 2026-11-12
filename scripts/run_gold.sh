@@ -29,7 +29,9 @@ T="$OUT/$TD"
 [[ -f $T/repo.bundle ]] || "$HERE/make_bundles.sh" "$OUT" "$(meta "$T" 'd["repository"]')"
 
 if [[ $RB_RUNTIME == frozen ]]; then
-  "$HERE/pull_task_images.sh" "$OUT" "$IMAGES" "$CACHE" "$ID"
+  # No image means no gold check: write no result, so the next run tries again.
+  "$HERE/pull_task_images.sh" "$OUT" "$IMAGES" "$CACHE" "$ID" ||
+    die "no image for $ID; nothing recorded. Fix the pull (see the log above) and run again."
 else
   "$HERE/warm_dependencies.sh" "$T" "$CACHE" "$IMAGES"
 fi

@@ -1,0 +1,112 @@
+diff --git a/scripts/env.sh b/scripts/env.sh
+index e6f5c8a..6ee1cf1 100755
+--- a/scripts/env.sh
++++ b/scripts/env.sh
+@@ -3,18 +3,31 @@
+ # For a first try everything lives in ./work inside the repository. To put the large files
+ # (images, caches, model weights) somewhere else later, set RB_WORK before sourcing:
+ #   RB_WORK=/big/disk/rb source scripts/env.sh
+-# Any single variable that is already set is kept as it is.
++# A variable that is already set is kept, unless its folder can't be created; then it is
++# reset to the default and a warning says so (e.g. an old export to a missing /scratch).
+ # shellcheck shell=bash
+ RB_REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ export RB_REPO
+-export RB_WORK=${RB_WORK:-$RB_REPO/work}
+-export IMAGES=${IMAGES:-$RB_WORK/images}                 # .sif images
+-export CACHE=${CACHE:-$RB_WORK/cache}                    # Maven/Gradle caches
+-export MODELS_ROOT=${MODELS_ROOT:-$RB_WORK/models}       # model weights
++
++_rb_dir() {  # _rb_dir <VAR> <default> : keep $VAR if usable, else use the default
++  local name=$1 default=$2 value=${!1:-}
++  if [[ -n $value ]] && ! mkdir -p "$value" 2>/dev/null; then
++    echo "warning: $name=$value can't be created; using $default instead" >&2
++    value=""
++  fi
++  value=${value:-$default}
++  mkdir -p "$value" || { echo "error: can't create $value for $name" >&2; return 1; }
++  export "$name=$value"
++}
++
++_rb_dir RB_WORK "$RB_REPO/work"
++_rb_dir IMAGES "$RB_WORK/images"                   # .sif images
++_rb_dir CACHE "$RB_WORK/cache"                     # Maven/Gradle caches
++_rb_dir MODELS_ROOT "$RB_WORK/models"              # model weights
++_rb_dir APPTAINER_CACHEDIR "$RB_WORK/apptainer-cache"
++_rb_dir APPTAINER_TMPDIR "$RB_WORK/tmp"
++_rb_dir OUT "$RB_REPO/out"                         # task folders
++_rb_dir RUNS "$RB_REPO/runs"                       # agent runs and results
+ export VLLM_SIF=${VLLM_SIF:-$IMAGES/vllm.sif}
+-export APPTAINER_CACHEDIR=${APPTAINER_CACHEDIR:-$RB_WORK/apptainer-cache}
+-export APPTAINER_TMPDIR=${APPTAINER_TMPDIR:-$RB_WORK/tmp}
+-export OUT=${OUT:-$RB_REPO/out}                          # task folders
+-export RUNS=${RUNS:-$RB_REPO/runs}                       # agent runs and results
+-mkdir -p "$IMAGES" "$CACHE" "$MODELS_ROOT" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
++unset -f _rb_dir
+ echo "RB_WORK=$RB_WORK  (images, caches, models)   OUT=$OUT   RUNS=$RUNS"
+diff --git a/scripts/pull_task_images.sh b/scripts/pull_task_images.sh
+index 3927f8b..ae1aa0f 100755
+--- a/scripts/pull_task_images.sh
++++ b/scripts/pull_task_images.sh
+@@ -14,29 +14,35 @@ set -euo pipefail
+ . "$(dirname "$0")/lib.sh"
+ OUT=$(cd "${1:?out_dir}" && pwd); IMAGES=${2:?images_dir}; CACHE=${3:?cache_dir}; shift 3
+ mkdir -p "$IMAGES/tasks" "$CACHE/tasks"; IMAGES=$(cd "$IMAGES" && pwd); CACHE=$(cd "$CACHE" && pwd)
++FAILED=0
+ 
+-python3 -I - "$OUT/manifest.json" "$@" <<'EOF' |
++TASKS=$(python3 -I - "$OUT/manifest.json" "$@" <<'EOF'
+ import json, sys
+ only = set(sys.argv[2:])
+ for t in json.load(open(sys.argv[1])):
+     if not only or t["repository"] in only or t["instance_id"] in only:
+         print(t["task_dir"])
+ EOF
++)
+ while read -r TD; do
++  [[ -n $TD ]] || continue
+   T="$OUT/$TD"; ID=$(task_id "$T")
+   REF=$(meta "$T" 'd["environment"].get("frozen_image")')
+   SIF="$IMAGES/tasks/$ID.sif"; C="$CACHE/tasks/$ID"
+   if [[ ! -s $SIF ]]; then
+     # SWE-PolyBench recommends its frozen :v1.1 tags; IBM's TDD-Bench harness pulls :latest.
+     # Try the pinned tag first and record which one was used.
+-    PULLED=""
++    PULLED=""; : > "$SIF.pull.log"
+     for R in "$REF" "${REF%:v1.1}:latest"; do
+       echo "pulling $R"
+-      if apptainer pull --force "$SIF.tmp" "$R" </dev/null >"$SIF.pull.log" 2>&1; then PULLED=$R; break; fi
++      echo "===== apptainer pull $R" >> "$SIF.pull.log"     # keep every attempt's output
++      if apptainer pull --force "$SIF.tmp" "$R" </dev/null >>"$SIF.pull.log" 2>&1; then PULLED=$R; break; fi
+       [[ $R == "${REF%:v1.1}:latest" || $REF != *:v1.1 ]] && break
+     done
+     if [[ -z $PULLED ]]; then
+-      echo "PULL FAILED $ID (see $SIF.pull.log)"; rm -f "$SIF.tmp"; continue
++      echo "PULL FAILED $ID; last lines of $SIF.pull.log:"
++      grep -E 'FATAL|ERROR|error|denied|space|quota' "$SIF.pull.log" | tail -n 6 | sed 's/^/    /'
++      rm -f "$SIF.tmp"; FAILED=$((FAILED + 1)); continue
+     fi
+     echo "$PULLED" > "$SIF.source"
+     mv "$SIF.tmp" "$SIF"; sha256sum "$SIF" | cut -d' ' -f1 > "$SIF.sha256"
+@@ -58,4 +64,5 @@ while read -r TD; do
+     touch "$C/.done"
+     echo "ready $ID  ($(du -sh "$C" | cut -f1) of caches)"
+   fi
+-done
++done <<< "$TASKS"
++(( FAILED == 0 )) || { echo "$FAILED image(s) failed to pull"; exit 1; }
+diff --git a/scripts/run_gold.sh b/scripts/run_gold.sh
+index 27d5528..7695135 100755
+--- a/scripts/run_gold.sh
++++ b/scripts/run_gold.sh
+@@ -29,7 +29,9 @@ T="$OUT/$TD"
+ [[ -f $T/repo.bundle ]] || "$HERE/make_bundles.sh" "$OUT" "$(meta "$T" 'd["repository"]')"
+ 
+ if [[ $RB_RUNTIME == frozen ]]; then
+-  "$HERE/pull_task_images.sh" "$OUT" "$IMAGES" "$CACHE" "$ID"
++  # No image means no gold check: write no result, so the next run tries again.
++  "$HERE/pull_task_images.sh" "$OUT" "$IMAGES" "$CACHE" "$ID" ||
++    die "no image for $ID; nothing recorded. Fix the pull (see the log above) and run again."
+ else
+   "$HERE/warm_dependencies.sh" "$T" "$CACHE" "$IMAGES"
+ fi
