@@ -18,7 +18,7 @@ PARTITION=${PARTITION:-gpuq}
 GPU_TYPE=${GPU_TYPE:-h200}             # gpuq: h200, aiq: b200 (the Foundry needs the type)
 RB_MAX_SECONDS=${RB_MAX_SECONDS:-1800}
 ALL_MODELS="gpt-oss-120b devstral-small glm-4.7-flash qwen3-coder-next"
-gpus_for() { [[ $1 == qwen3-coder-next ]] && echo 2 || echo 1; }   # TP = number of GPUs
+gpus_for() { python3 -I -c 'import json,sys; print(next(m.get("tensor_parallel",1) for m in json.load(open("configs/models.json"))["models"] if m["name"]==sys.argv[1]))' "$1"; }   # TP = number of GPUs, from configs/models.json
 
 check() {
   printf '%-18s %-9s %-26s %-10s %-12s %s\n' MODEL SELFTEST STOP LOG_LINES PATCH_BYTES OUTCOME

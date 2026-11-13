@@ -6,11 +6,14 @@
       "hf_repo": "Qwen/Qwen3-Coder-Next",
       "vendor": "Alibaba Qwen",
       "licence": "Apache-2.0",
-      "architecture": "MoE, about 80B total / 3B active (model card)",
-      "vllm_args": ["--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder"]
+      "architecture": "MoE, about 80B total / 3B active (model card); bf16 weights ~160 GB, so 2 x H200",
+      "tensor_parallel": 2,
+      "vllm_args": ["--max-model-len", "262144", "--gpu-memory-utilization", "0.95", "--max-num-seqs", "16",
+                    "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder", "--trust-remote-code"]
     },
     {
       "name": "gpt-oss-120b",
+      "tensor_parallel": 1,
       "hf_repo": "openai/gpt-oss-120b",
       "vendor": "OpenAI (open weights)",
       "licence": "Apache-2.0",
@@ -19,6 +22,7 @@
     },
     {
       "name": "devstral-small",
+      "tensor_parallel": 1,
       "hf_repo": "mistralai/Devstral-Small-2507",
       "vendor": "Mistral AI",
       "licence": "Apache-2.0",
@@ -28,6 +32,7 @@
     },
     {
       "name": "glm-4.7-flash",
+      "tensor_parallel": 1,
       "hf_repo": "zai-org/GLM-4.7-Flash",
       "vendor": "Zhipu AI (Z.ai)",
       "licence": "see model card",
