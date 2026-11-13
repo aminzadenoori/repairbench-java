@@ -30,7 +30,15 @@ SOCKDIR=$(dirname "$SOCK"); mkdir -p "$SOCKDIR"; rm -f "$SOCK"
 STATE=$SOCKDIR/vllm-state-$INST                       # writable caches for vLLM/torch/triton
 mkdir -p "$STATE/home"            # --home, not --env HOME (Apptainer refuses that)
 
-apptainer instance start --nv --net --network none --containall --home "$STATE/home" \
+# --containall clears the environment, including CUDA_VISIBLE_DEVICES: without it vLLM sees
+# every GPU on the node and loads onto GPU 0, which may not be ours. Pass Slurm's choice in.
+GPU_ENV=()
+[[ -n ${CUDA_VISIBLE_DEVICES:-} ]] && GPU_ENV=(--env "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES")
+NGPU=$(apptainer exec --nv --containall "${GPU_ENV[@]}" "$VLLM_SIF" nvidia-smi -L 2>/dev/null | grep -c '^GPU' || true)
+echo "GPUs given to vLLM: ${CUDA_VISIBLE_DEVICES:-<all on node>} ($NGPU visible in the container), tensor-parallel $TP"
+(( NGPU >= TP )) || { echo "need $TP GPUs for tensor-parallel $TP, the container sees $NGPU" >&2; exit 2; }
+
+apptainer instance start --nv --net --network none --containall --home "$STATE/home" "${GPU_ENV[@]}" \
   --bind "$MODELS_ROOT:/models:ro" --bind "$SOCKDIR:/sock" --bind "$STATE:/state" \
   --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env VLLM_NO_USAGE_STATS=1 --env DO_NOT_TRACK=1 \
   --env XDG_CACHE_HOME=/state/cache --env HF_HOME=/state/hf \
