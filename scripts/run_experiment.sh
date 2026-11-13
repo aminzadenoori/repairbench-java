@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Stage 2 + 3 for one model over a list of tasks (resumable: finished tasks are skipped).
-#   scripts/run_experiment.sh <model_name> <base_url> <task_list.txt> <out_dir> <images_dir> <cache_dir> <runs_dir>
+#   scripts/run_experiment.sh <model_name> <model_socket> <task_list.txt> <out_dir> <images_dir> <cache_dir> <runs_dir>
 # task_list.txt: one instance_id per line (e.g. from: jq -r '.[].instance_id' manifest.json).
 # Run once per model (each with its own vLLM server), then: python3 scripts/summarize.py <out> <runs>
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-MODEL=${1:?model}; URL=${2:?base_url}; LIST=${3:?task_list}; OUT=${4:?out_dir}
+MODEL=${1:?model}; URL=${2:?model socket (or http URL)}; LIST=${3:?task_list}; OUT=${4:?out_dir}
 IMAGES=${5:?images_dir}; CACHE=${6:?cache_dir}; RUNS=${7:?runs_dir}
 
 python3 -I -c '

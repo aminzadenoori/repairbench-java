@@ -38,9 +38,9 @@ echo '[{"instance_id": "demo__calc-1", "repository": "demo/calc", "task_dir": "e
 touch "$T/images/java-ubuntu22.04-jdk11.sif" "$T/images/tasks/demo__calc-1.sif"
 mkdir -p /testbed 2>/dev/null || true; mkdir -p /testbed/.git 2>/dev/null || true   # "image's" own repo copy
 
-PORT=$((20000 + RANDOM % 20000))
-python3 -I "$ROOT/tests/fake/model_server.py" "$PORT" & SRV=$!
-sleep 1
+SOCK="$T/model.sock"                      # the model is reached over a Unix socket, as on the cluster
+python3 -I "$ROOT/tests/fake/model_server.py" "$SOCK" & SRV=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -S $SOCK ]] && break; sleep 0.5; done
 
 MODE=$(apptainer fake-mode)
 echo "fake apptainer mode: $MODE"
@@ -66,13 +66,17 @@ for RT in built frozen; do
   rm -rf "$TASK/validation" "$T/runs"
   "$ROOT/scripts/validate_task.sh" "$TASK" "$T/images" "$T/cache" 3 >/dev/null
   check "$TASK/validation/verdict.json" 'd["verdict"]=="valid_fail_to_pass" and d["fail_to_pass"]==["demo.CalcTest::testAdd"] and d["pass_to_pass"]==["demo.CalcTest::testSub"]'
-  "$ROOT/scripts/run_agent.sh" "$TASK" fake-model "http://127.0.0.1:$PORT/v1" "$T/images" "$T/cache" "$T/runs"
-  RD="$T/runs/fake-model/demo__calc-1"
-  check "$RD/selftest.json" 'd["passed"]'
-  check "$RD/agent.json" 'd["stop_reason"]=="finished"'
-  grep -q '^+    return a + b;' "$RD/candidate.patch" && echo "candidate.patch contains the fix"
-  "$ROOT/scripts/evaluate_candidate.sh" "$TASK" "$RD" "$T/images" "$T/cache" >/dev/null
-  check "$RD/result.json" 'd["outcome"]=="resolved"'
+  for WHERE in container host; do      # agent inside the sealed container (forwarder), or the host fallback
+    rm -rf "$T/runs/fake-model"
+    RB_AGENT_WHERE=$WHERE "$ROOT/scripts/run_agent.sh" "$TASK" fake-model "$SOCK" "$T/images" "$T/cache" "$T/runs"
+    RD="$T/runs/fake-model/demo__calc-1"
+    check "$RD/run.json" "d['status']=='ok' and d['agent_location']=='$WHERE'"
+    check "$RD/selftest.json" 'd["passed"]'
+    check "$RD/agent.json" 'd["stop_reason"]=="finished"'
+    grep -q '^+    return a + b;' "$RD/candidate.patch" && echo "candidate.patch contains the fix"
+    "$ROOT/scripts/evaluate_candidate.sh" "$TASK" "$RD" "$T/images" "$T/cache" >/dev/null
+    check "$RD/result.json" 'd["outcome"]=="resolved"'
+  done
   # A wrong patch must be scored unresolved, an empty one as empty_patch
   mkdir -p "$T/runs/bad-model/demo__calc-1" "$T/runs/empty-model/demo__calc-1"
   sed 's/a + b/a * b/' "$RD/candidate.patch" > "$T/runs/bad-model/demo__calc-1/candidate.patch"

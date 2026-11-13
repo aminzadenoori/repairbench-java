@@ -23,9 +23,14 @@ from pathlib import Path
 
 STATE = Path(os.environ.get("FAKE_APPTAINER_STATE", "/tmp/fake-apptainer"))
 STATE.mkdir(parents=True, exist_ok=True)
-VALUE_OPTS = {"--bind", "-B", "--env", "--pwd", "--network", "--build-arg"}
+VALUE_OPTS = {"--bind", "-B", "--env", "--pwd", "--network", "--build-arg", "--home"}
 FLAG_OPTS = {"--net", "--containall", "--no-home", "--nv", "--fakeroot", "--force", "--cleanenv"}
 FAKE_BIN = str(Path(__file__).resolve().parent / "bin")
+# A new network namespace starts with loopback DOWN; real Apptainer (--network none) brings
+# it up, so 127.0.0.1 works inside the container. Do the same (SIOCGIFFLAGS/SIOCSIFFLAGS).
+LO_UP = ("import fcntl,socket,struct; s=socket.socket(); f=struct.unpack('16sH14x', fcntl.ioctl("
+         "s, 0x8913, struct.pack('16sH14x', b'lo', 0)))[1]; "
+         "fcntl.ioctl(s, 0x8914, struct.pack('16sH14x', b'lo', f | 1))")
 
 
 def works(cmd):
@@ -78,6 +83,8 @@ def run_mount(opts, cmd):
         if b.endswith(":ro"):
             script.append(f"mount -o remount,bind,ro {shlex.quote(dst)}")
     exports = " ".join(f"export {shlex.quote(e)};" for e in opts["env"])
+    if opts["nonet"]:
+        script.append(f"python3 -c {shlex.quote(LO_UP)} || true")
     script.append(f"export PATH={shlex.quote(FAKE_BIN)}:$PATH; {exports} "
                   f"cd {shlex.quote(opts['pwd'] or '/')} && exec \"$@\"")
     unshare = ["unshare", "-m", "--propagation", "private"] + (["-n"] if opts["nonet"] else [])
@@ -105,7 +112,9 @@ def run_translate(opts, cmd, isolate_net):
         env[k] = tr(v)
     cwd = tr(opts["pwd"]) if opts["pwd"] else None
     cmd = [tr(c) for c in cmd]
-    prefix = ["unshare", "-rn"] if (opts["nonet"] and isolate_net) else []
+    prefix = []
+    if opts["nonet"] and isolate_net:
+        prefix = ["unshare", "-rn", "bash", "-c", f"python3 -c {shlex.quote(LO_UP)} || true; exec \"$@\"", "fake"]
     return subprocess.call(prefix + cmd, env=env, cwd=cwd)
 
 

@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# Start ONE OpenAI-compatible vLLM server for one model on this GPU node, fully offline.
-#   MODELS_ROOT=/shared/models VLLM_SIF=vllm.sif scripts/serve_model.sh <model-name> [port] [tensor-parallel]
-# Agent containers (started with --network none) reach it through a Unix socket or the
-# node's loopback, as described in the README; the server itself needs no internet.
+# Start ONE vLLM server for one model, fully sealed: an Apptainer instance with
+# --net --network none (no internet, no TCP from outside), the weights mounted read-only,
+# Hugging Face offline. It answers on a Unix socket file on the node's local disk, so only
+# processes on the SAME node can talk to it: the agent harness of the same Slurm job.
+#
+#   scripts/serve_model.sh <model-name> <socket-path> [tensor-parallel] [instance-name]
+#   e.g. scripts/serve_model.sh gpt-oss-120b /tmp/$USER-rb/vllm.sock 1 rbvllm_123
+# Agent containers mount the socket folder and reach it via agent/uds_proxy.py.
+# Stays in the foreground while the server runs; stopping it stops the instance.
 set -euo pipefail
-NAME=${1:?usage: serve_model.sh <model-name> [port] [tp]}
-PORT=${2:-8000}
+NAME=${1:?usage: serve_model.sh <model-name> <socket-path> [tp] [instance-name]}
+SOCK=${2:?socket path, on a local disk of this node}
 TP=${3:-1}
+INST=${4:-rbvllm_$$}
 MODELS_ROOT=${MODELS_ROOT:?set MODELS_ROOT}
 VLLM_SIF=${VLLM_SIF:?set VLLM_SIF to an Apptainer image with vLLM}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+[[ -d $MODELS_ROOT/$NAME ]] || { echo "model $NAME not found in $MODELS_ROOT" >&2; exit 2; }
+
 mapfile -t ARGS < <(python3 -I -c '
 import json, sys
 for m in json.load(open(sys.argv[1]))["models"]:
@@ -18,7 +26,16 @@ for m in json.load(open(sys.argv[1]))["models"]:
 else:
     sys.exit("unknown model " + sys.argv[2])' "$HERE/configs/models.json" "$NAME")
 
-exec apptainer exec --nv --bind "$MODELS_ROOT:/models:ro" \
-  --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 \
-  "$VLLM_SIF" vllm serve "/models/$NAME" --served-model-name "$NAME" \
-  --host 127.0.0.1 --port "$PORT" --tensor-parallel-size "$TP" "${ARGS[@]}"
+SOCKDIR=$(dirname "$SOCK"); mkdir -p "$SOCKDIR"; rm -f "$SOCK"
+STATE=$SOCKDIR/vllm-state-$INST                       # writable caches for vLLM/torch/triton
+mkdir -p "$STATE/home"            # --home, not --env HOME (Apptainer refuses that)
+
+apptainer instance start --nv --net --network none --containall --home "$STATE/home" \
+  --bind "$MODELS_ROOT:/models:ro" --bind "$SOCKDIR:/sock" --bind "$STATE:/state" \
+  --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env VLLM_NO_USAGE_STATS=1 --env DO_NOT_TRACK=1 \
+  --env XDG_CACHE_HOME=/state/cache --env HF_HOME=/state/hf \
+  "$VLLM_SIF" "$INST" >/dev/null
+trap 'apptainer instance stop "$INST" >/dev/null 2>&1 || true' EXIT
+
+apptainer exec --pwd / "instance://$INST" vllm serve "/models/$NAME" --served-model-name "$NAME" \
+  --uds "/sock/$(basename "$SOCK")" --tensor-parallel-size "$TP" "${ARGS[@]}"

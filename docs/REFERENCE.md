@@ -18,8 +18,8 @@
 | `scripts/validate_task.sh <task> IMAGES CACHE [reps]` | 1 | ORACLE/BASE validation of one task |
 | `scripts/warm_dependencies.sh <task> CACHE IMAGES [jdk]` | 1 | built runtime: download one task's dependencies |
 | `scripts/download_models.sh [name ...]` | 2 | Hugging Face weights to `MODELS_ROOT` |
-| `scripts/serve_model.sh <name> [port] [tp]` | 2 | offline vLLM server for one model |
-| `scripts/run_agent.sh <task> <model> <url> IMAGES CACHE runs` | 2 | one model on one task, with leak self-test |
+| `scripts/serve_model.sh <name> <socket> [tp] [instance]` | 2 | sealed vLLM server for one model, on a socket file |
+| `scripts/run_agent.sh <task> <model> <socket> IMAGES CACHE runs` | 2 | one model on one task, with leak self-test; agent inside the sealed container (`RB_AGENT_WHERE=host` to run it outside) |
 | `scripts/leak_selftest.sh out.json history hidden -- <exec>` | 2 | the sandbox checks, on their own |
 | `scripts/evaluate_candidate.sh <task> <run_dir> IMAGES CACHE` | 3 | score one `candidate.patch` |
 | `scripts/run_experiment.sh <model> <url> list out IMAGES CACHE runs` | 2+3 | agent + evaluation over a task list |
@@ -40,7 +40,8 @@ Each one is kept if already set. For a first try everything stays inside the rep
 | `CACHE` | `$RB_WORK/cache` | Maven/Gradle caches |
 | `MODELS_ROOT` | `$RB_WORK/models` | model weights |
 | `VLLM_SIF` | `$IMAGES/vllm.sif` | vLLM image |
-| `APPTAINER_CACHEDIR`, `APPTAINER_TMPDIR` | `$RB_WORK/apptainer-cache`, `$RB_WORK/tmp` | Apptainer's pull cache and temp files |
+| `APPTAINER_CACHEDIR` | `$RB_WORK/apptainer-cache` | Apptainer's download cache |
+| `APPTAINER_TMPDIR` | `/tmp/$USER-rb-apptainer-tmp` | where images are unpacked while pulling; must be a local disk (10–20 GB free) |
 | `OUT` | `<repo>/out` | task folders, gold-check results |
 | `RUNS` | `<repo>/runs` | agent runs, evaluation results, metrics |
 
