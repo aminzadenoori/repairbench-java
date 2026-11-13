@@ -4,7 +4,9 @@
 # task list, stop vLLM. Resumable: finished tasks are skipped if the job is resubmitted.
 #
 #   sbatch --export=ALL,MODEL=gpt-oss-120b,TP=1 --gres=gpu:h200:1 scripts/slurm_run_model.sh
-#   sbatch --export=ALL,MODEL=qwen3-coder-next,TP=2 --gres=gpu:h200:2 scripts/slurm_run_model.sh
+#   sbatch --export=ALL,MODEL=qwen3-coder-next --gres=gpu:h200:2 scripts/slurm_run_model.sh
+# TP (number of GPUs) defaults to the model's "tensor_parallel" in configs/models.json;
+# --gres must ask for that many GPUs.
 # Optional: TASKS=<file with instance ids> (default: out/validated_tasks.txt),
 #           WORKERS=<agents in parallel against the one vLLM server> (default 4)
 #
@@ -25,7 +27,7 @@ source scripts/env.sh
 export APPTAINER_TMPDIR=/tmp/$USER/apptainer-tmp && mkdir -p "$APPTAINER_TMPDIR"
 
 MODEL=${MODEL:?set MODEL, e.g. --export=ALL,MODEL=gpt-oss-120b}
-TP=${TP:-1}
+TP=${TP:-$(python3 -I -c 'import json,sys; print(next(m.get("tensor_parallel",1) for m in json.load(open("configs/models.json"))["models"] if m["name"]==sys.argv[1]))' "$MODEL")}
 TASKS=${TASKS:-$OUT/validated_tasks.txt}
 # Both containers run on THIS node, both with no network: vLLM answers on a socket file on
 # local disk; every agent container mounts that folder and reaches it through its own
