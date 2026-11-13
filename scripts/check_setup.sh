@@ -37,6 +37,34 @@ if (( FREE >= 300 )); then ok "free disk at $RB_WORK: ${FREE} GB"
 elif (( FREE >= 10 )); then warn "free disk at $RB_WORK: ${FREE} GB (enough for a first try with a few tasks)" \
   "all 250 frozen images + the 4 models need several hundred GB; later set RB_WORK to a bigger disk"
 else fail "only ${FREE} GB free at $RB_WORK" "set RB_WORK to a disk with more space and re-source scripts/env.sh"; fi
+# Apptainer unpacks image layers in APPTAINER_TMPDIR; real images contain names like ":.1.gz"
+# that some network file systems reject ("invalid argument" during the pull).
+NAMES_OK=$(python3 - "$APPTAINER_TMPDIR" <<'EOF'
+import os, sys, tempfile
+d = tempfile.mkdtemp(dir=sys.argv[1])
+bad = []
+for n in [":.1.gz", "a:b", "x?y", "back\\slash", "trail.", "CON"]:
+    try:
+        open(os.path.join(d, n), "w").close()
+    except OSError:
+        bad.append(n)
+for n in os.listdir(d):
+    os.unlink(os.path.join(d, n))
+os.rmdir(d)
+print(" ".join(bad))
+EOF
+)
+TFREE=$(python3 -c 'import shutil,sys; print(shutil.disk_usage(sys.argv[1]).free // 2**30)' "$APPTAINER_TMPDIR" 2>/dev/null || echo 0)
+if [[ -n $NAMES_OK ]]; then
+  fail "APPTAINER_TMPDIR=$APPTAINER_TMPDIR rejects file names used inside images: $NAMES_OK" \
+       "pulls fail with 'invalid argument'; use a local disk: export APPTAINER_TMPDIR=/tmp/\$USER/apptainer-tmp"
+  need frozen no
+elif (( TFREE < 10 )); then
+  warn "only ${TFREE} GB free in APPTAINER_TMPDIR=$APPTAINER_TMPDIR (images are unpacked there while pulling)" \
+       "pick a local disk with 10-20 GB free: export APPTAINER_TMPDIR=<dir>"
+else
+  ok "APPTAINER_TMPDIR=$APPTAINER_TMPDIR accepts image file names, ${TFREE} GB free"
+fi
 if have unshare && unshare -rn true 2>/dev/null; then ok "user namespaces allowed (tests/e2e_fake.sh can cut the network)"
 else warn "user namespaces not allowed for this user" "tests/e2e_fake.sh will run, but its leak self-test check fails on purpose"; fi
 
@@ -147,7 +175,7 @@ if have apptainer; then
     rm -rf "$T"
   else warn "QUICK=1: Apptainer runtime checks skipped"; fi
 else
-  fail "apptainer not found" "module load apptainer (or singularity), or ask your admins"; need frozen no; need built no; need run no
+  fail "apptainer not found" "apptainer should be on the PATH (no module needed); check: command -v apptainer"; need frozen no; need built no; need run no
 fi
 
 # -------------------------------------------------------------------------- models / GPU

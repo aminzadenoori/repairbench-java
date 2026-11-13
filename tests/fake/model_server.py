@@ -3,9 +3,12 @@
 
 It plays a model that inspects the demo repo, fixes Calc.add, and calls finish. It also
 checks that every request carries the tools and that tool results come back.
-    python3 model_server.py <port>
+    python3 model_server.py <port>            TCP on 127.0.0.1
+    python3 model_server.py /path/to.sock     Unix socket, as the sealed vLLM uses
 """
 import json
+import os
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -40,4 +43,15 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+class UnixHTTPServer(socketserver.UnixStreamServer):
+    def get_request(self):
+        req, _ = super().get_request()
+        return req, ("local", 0)          # BaseHTTPRequestHandler expects (host, port)
+
+
+if sys.argv[1].startswith("/"):
+    if os.path.exists(sys.argv[1]):
+        os.unlink(sys.argv[1])
+    UnixHTTPServer(sys.argv[1], H).serve_forever()
+else:
+    HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()

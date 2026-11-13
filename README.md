@@ -54,7 +54,7 @@ first. Typical ones:
 | scripts are not executable | run the `chmod +x ...` line it prints (happens after a web upload) |
 | GHCR / Docker Hub not reachable | ask whether `ghcr.io` and `registry-1.docker.io` are allowed from this node, or use another node |
 | `--network none` not allowed | ask the admins to allow it (`allow net networks` in `apptainer.conf`); Stages 2–3 need it |
-| apptainer not found | `module load apptainer` (or `singularity`) |
+| apptainer not found | it should be on the PATH of every node (no module needed); check `command -v apptainer` on that node |
 | Hugging Face needs a login | accept the model licence on the website, then `hf auth login` |
 
 Large files go to `work/` inside the repo by default, which is fine for a first try. When
@@ -79,11 +79,14 @@ cat "$OUT/eval_logs/google__gson-2337_result.json"        # want "resolved": tru
 pip install -U "huggingface_hub[cli]"
 scripts/download_models.sh qwen3-coder-next
 apptainer build --fakeroot --build-arg VLLM_VERSION=v0.11.0 "$VLLM_SIF" environments/vllm.def
-scripts/serve_model.sh qwen3-coder-next 8000 1 &
+SOCK=/tmp/$USER-rb/vllm.sock          # vLLM has no network: it answers on this socket file
+scripts/serve_model.sh qwen3-coder-next "$SOCK" 1 rbvllm &
+until curl -sf --unix-socket "$SOCK" http://localhost/v1/models >/dev/null; do sleep 10; done
 
-# 4. agent + evaluation on that task
+# 4. agent + evaluation on that task (the agent runs inside the sealed task container and
+#    reaches the socket through its own forwarder at 127.0.0.1:8000)
 echo google__gson-2337 > one.txt
-RB_RUNTIME=frozen scripts/run_experiment.sh qwen3-coder-next http://127.0.0.1:8000/v1 \
+RB_RUNTIME=frozen scripts/run_experiment.sh qwen3-coder-next "$SOCK" \
     one.txt "$OUT" "$IMAGES" "$CACHE" "$RUNS"
 cat "$RUNS/qwen3-coder-next/google__gson-2337/result.json"   # "outcome": "resolved" or not
 ```
@@ -100,12 +103,14 @@ python3 scripts/score_gold.py "$OUT"                      # -> out/validated_tas
 
 # Stages 2 + 3: each of the four models
 scripts/download_models.sh                                # all four, once
-for M in qwen3-coder-next gpt-oss-120b devstral-small glm-4.7-flash; do
-  scripts/serve_model.sh "$M" 8000 1 &
-  until curl -sf http://127.0.0.1:8000/v1/models >/dev/null; do sleep 10; done
-  RB_RUNTIME=frozen scripts/run_experiment.sh "$M" http://127.0.0.1:8000/v1 \
+# (on the cluster use scripts/slurm_run_model.sh, which does the same per model as a job)
+SOCK=/tmp/$USER-rb/vllm.sock
+for M in qwen3-coder-next gpt-oss-120b devstral-small glm-4.7-flash; do   # one round per model
+  scripts/serve_model.sh "$M" "$SOCK" 1 rbvllm &
+  until curl -sf --unix-socket "$SOCK" http://localhost/v1/models >/dev/null; do sleep 10; done
+  RB_RUNTIME=frozen scripts/run_experiment.sh "$M" "$SOCK" \
       "$OUT/validated_tasks.txt" "$OUT" "$IMAGES" "$CACHE" "$RUNS"
-  kill %1; wait
+  apptainer instance stop rbvllm; wait                    # stop vLLM, next model
 done
 
 # Results
@@ -140,6 +145,7 @@ Every step skips work already done, so you can stop and restart at any time.
 | anything at the start | `scripts/check_setup.sh` | it names the missing tool, permission or site |
 | `Permission denied` running a script | `ls -l scripts/` | executable bits lost: run the `chmod +x` line the check prints |
 | `PULL FAILED` | `$IMAGES/tasks/<id>.sif.pull.log` | no access to `ghcr.io` / Docker Hub from this node |
+| pull fails with `unpack entry ... invalid argument` | the same log | `APPTAINER_TMPDIR` is on a network file system that rejects names like `:.1.gz`; use local disk: `export APPTAINER_TMPDIR=/tmp/$USER/apptainer-tmp` |
 | gold check `oracle_no_test_results` | `<task>/validation/oracle-*-1.log` | build failed offline: missing dependency, wrong JDK |
 | `WARNING ... no Maven/Gradle cache` | pull output | `/root` unreadable in the image and `--fakeroot` not allowed |
 | run status `leak_selftest_failed` | `runs/<model>/<id>/selftest.json` | the sandbox could reach the network or the image's repo copy |

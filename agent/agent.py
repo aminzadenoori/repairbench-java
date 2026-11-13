@@ -2,9 +2,12 @@
 """Minimal coding agent for Stage 2: an open LLM behind a local OpenAI-compatible server
 (vLLM) fixes one task inside an offline Apptainer instance.
 
-The harness (this script) runs on the host and talks only to the model server. Every
-command the model asks for runs inside the instance, which was started with
-`--net --network none`, so the model's commands cannot reach the internet.
+Normally this script runs INSIDE the sealed instance (`--net --network none`), started by
+agent/in_container.sh with --exec-prefix '[]' and --base-url http://127.0.0.1:8000/v1 (the
+forwarder to vLLM's socket). Fallback: it runs on the host with --base-url
+unix:///path/vllm.sock:/v1 and an `apptainer exec ... instance://` prefix, so every tool
+command still runs inside the instance. Either way the model's commands cannot reach the
+internet.
 
 Tools given to the model:
   bash(command, timeout)        run a shell command in /work/repo inside the instance
@@ -23,7 +26,9 @@ repository and .git off limits. Uses only the Python standard library.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
+import socket
 import os
 import posixpath
 import shlex
@@ -151,21 +156,56 @@ class Sandbox:
         return f"ok: wrote {path} ({len(content)} characters)"
 
 
-def chat(base_url: str, payload: dict, api_key: str, retries: int = 3) -> dict:
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """HTTP over a Unix domain socket: the model server runs with no network at all and
+    listens on a socket file instead of a TCP port."""
+
+    def __init__(self, socket_path: str, timeout: float):
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(self.timeout)
+        s.connect(self.socket_path)
+        self.sock = s
+
+
+def post_json(base_url: str, path: str, payload: dict, api_key: str, timeout: float = 900):
+    """POST JSON to base_url + path. base_url is http(s)://host:port/v1 or
+    unix:///path/to/socket[:/v1] (the socket path, then the URL prefix, default /v1)."""
     data = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    if base_url.startswith("unix://"):
+        rest = base_url[len("unix://"):]
+        sock, _, prefix = rest.partition(":")
+        conn = UnixHTTPConnection(sock, timeout)
+        try:
+            conn.request("POST", (prefix or "/v1").rstrip("/") + path, body=data, headers=headers)
+            r = conn.getresponse()
+            return r.status, r.read()
+        finally:
+            conn.close()
+    req = urllib.request.Request(base_url.rstrip("/") + path, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def chat(base_url: str, payload: dict, api_key: str, retries: int = 3) -> dict:
     last = None
     for attempt in range(retries):
-        req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions", data=data, headers={
-            "Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
         try:
-            with urllib.request.urlopen(req, timeout=900) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode(errors="replace")
-            if e.code == 400:
-                raise RuntimeError(f"bad_request: {body[:500]}") from None
-            last = f"HTTP {e.code}: {body[:300]}"
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            status, body = post_json(base_url, "/chat/completions", payload, api_key)
+            if status == 200:
+                return json.loads(body)
+            text = body.decode(errors="replace")
+            if status == 400:
+                raise RuntimeError(f"bad_request: {text[:500]}")
+            last = f"HTTP {status}: {text[:300]}"
+        except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException) as e:
             last = str(e)
         time.sleep(5 * (attempt + 1))
     raise RuntimeError(f"model_server_unavailable: {last}")

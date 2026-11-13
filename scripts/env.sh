@@ -25,7 +25,10 @@ _rb_dir IMAGES "$RB_WORK/images"                   # .sif images
 _rb_dir CACHE "$RB_WORK/cache"                     # Maven/Gradle caches
 _rb_dir MODELS_ROOT "$RB_WORK/models"              # model weights
 _rb_dir APPTAINER_CACHEDIR "$RB_WORK/apptainer-cache"
-_rb_dir APPTAINER_TMPDIR "$RB_WORK/tmp"
+# Apptainer unpacks images here while pulling. Keep it on a LOCAL disk: network file
+# systems (e.g. some home/NFS/SMB mounts) reject file names such as ":.1.gz" that real
+# images contain, and the pull then fails with "invalid argument".
+_rb_dir APPTAINER_TMPDIR "${TMPDIR:-/tmp}/${USER:-rb}-rb-apptainer-tmp"
 _rb_dir OUT "$RB_REPO/out"                         # task folders
 _rb_dir RUNS "$RB_REPO/runs"                       # agent runs and results
 export VLLM_SIF=${VLLM_SIF:-$IMAGES/vllm.sif}

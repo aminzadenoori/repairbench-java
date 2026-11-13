@@ -69,12 +69,15 @@ Four open-weight models from Hugging Face (`configs/models.json`):
 | devstral-small | `mistralai/Devstral-Small-2507` |
 | glm-4.7-flash | `zai-org/GLM-4.7-Flash` |
 
-One vLLM server per GPU node (`serve_model.sh`), weights mounted read-only, Hugging Face
-offline mode on. For each task, `run_agent.sh`:
+One vLLM server per GPU node and model (`serve_model.sh`): an Apptainer instance with
+`--net --network none`, weights mounted read-only, Hugging Face offline. Having no network,
+it answers on a Unix socket file on the node's local `/tmp`. All agent containers of the
+round share it; then it is stopped and the next model is loaded. For each task, `run_agent.sh`:
 
 1. builds a fresh workspace from `repo.bundle`: no remote, a single commit
    (`RB_HISTORY=base` keeps the history up to base instead);
-2. starts an Apptainer instance with `--net --network none --containall` on the profile
+2. starts an Apptainer instance with `--net --network none --containall` (the socket folder
+   mounted at `/rb/sock`, the agent code read-only at `/rb/agent`) on the profile
    frozen by the gold check; the dependency cache is read-only; Maven and Gradle are forced
    offline; for frozen images an empty folder is mounted over the image's own repo copy, so
    its git history cannot be read;
@@ -82,8 +85,13 @@ offline mode on. For each task, `run_agent.sh`:
    an online Maven download and `git fetch` must all fail; there must be no git remote and a
    single commit; the image's repo copy must be hidden. If anything fails, the agent is not
    started;
-4. runs `agent/agent.py`: the harness talks to vLLM from outside; every tool call (`bash`,
-   `str_replace`, `write_file`, `finish`) runs inside the instance;
+4. runs the agent **inside that sealed instance** (`agent/in_container.sh`): the forwarder
+   `agent/uds_proxy.py` listens on the container's own `127.0.0.1:8000` and passes bytes to
+   the socket, so `agent/agent.py` (or any OpenAI-compatible agent) uses
+   `http://127.0.0.1:8000/v1`; its tool calls (`bash`, `str_replace`, `write_file`,
+   `finish`) run right there. If the image has no `python3` >= 3.7, the agent loop runs on
+   the host instead, talks to the socket directly and sends each tool call into the
+   instance; `run.json` records `agent_location` (`container` or `host`);
 5. saves `candidate.patch` (the full workspace diff) and the run records.
 
 ## Stage 3 — Evaluation (network OFF)
