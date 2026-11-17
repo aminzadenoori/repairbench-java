@@ -4,17 +4,23 @@
 # Hugging Face offline. It answers on a Unix socket file on the node's local disk, so only
 # processes on the SAME node can talk to it: the agent harness of the same Slurm job.
 #
-#   scripts/serve_model.sh <model-name> <socket-path> [tensor-parallel] [instance-name]
+#   scripts/serve_model.sh <model-name> [socket-path] [tensor-parallel] [instance-name]
+# socket-path: "" or "auto" makes a unique one, /tmp/$USER-rb/<id>/vllm.sock with
+#   <id> = <user>_<timestamp>_<random> (scripts/new_id.sh); the first output line says which.
 # tensor-parallel (= number of GPUs) defaults to the model's "tensor_parallel" in
-# configs/models.json; give "" to keep that default and still name the instance.
-#   e.g. scripts/serve_model.sh gpt-oss-120b /tmp/$USER-rb/vllm.sock 1 rbvllm_123
+#   configs/models.json; give "" to keep that default and still name the instance.
+# instance-name defaults to rbvllm_<id>, <id> being the socket's folder name.
+#   e.g. SOCK=/tmp/$USER-rb/$(scripts/new_id.sh)/vllm.sock
+#        scripts/serve_model.sh gpt-oss-120b "$SOCK"
 # Agent containers mount the socket folder and reach it via agent/uds_proxy.py.
 # Stays in the foreground while the server runs; stopping it stops the instance.
 set -euo pipefail
-NAME=${1:?usage: serve_model.sh <model-name> <socket-path> [tp] [instance-name]}
-SOCK=${2:?socket path, on a local disk of this node}
+NAME=${1:?usage: serve_model.sh <model-name> [socket-path|auto] [tp] [instance-name]}
+SOCK=${2:-auto}
 TP=${3:-}
-INST=${4:-rbvllm_$$}
+[[ $SOCK == auto ]] && SOCK=/tmp/${USER:-$(id -un)}-rb/$("$(dirname "$0")/new_id.sh")/vllm.sock
+INST=${4:-rbvllm_$(basename "$(dirname "$SOCK")")}
+echo "socket: $SOCK   instance: $INST"
 MODELS_ROOT=${MODELS_ROOT:?set MODELS_ROOT}
 VLLM_SIF=${VLLM_SIF:?set VLLM_SIF to an Apptainer image with vLLM}
 HERE=$(cd "$(dirname "$0")/.." && pwd)

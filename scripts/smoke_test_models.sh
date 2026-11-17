@@ -23,7 +23,7 @@ gpus_for() { python3 -I -c 'import json,sys; print(next(m.get("tensor_parallel",
 check() {
   printf '%-18s %-9s %-26s %-10s %-12s %s\n' MODEL SELFTEST STOP LOG_LINES PATCH_BYTES OUTCOME
   for M in $ALL_MODELS; do
-    python3 -I - "$RUNS/$M/$TASK" "$M" <<'EOF'
+    python3 -I - "$RUNS/$(cat logs/smoke-experiment.txt 2>/dev/null || echo none)/$M/$TASK" "$M" <<'EOF'
 import json, os, sys
 d, m = sys.argv[1], sys.argv[2]
 def j(f, k):
@@ -42,7 +42,7 @@ EOF
 
 Good: SELFTEST=True, STOP=finished (or time_budget/max_steps), LOG_LINES in the dozens or more,
 OUTCOME=resolved or unresolved. "missing..." or eval_no_test_results means a pipeline problem.
-Logs: logs/smoke-<model>-<job>.out, logs/vllm-<model>-<job>.log, logs/agents-<model>-<job>-*.log
+Logs: logs/smoke-<model>-<job>.out, logs/vllm-<model>-<id>.log, logs/agents-<model>-<id>-*.log
 EOF
 }
 
@@ -67,10 +67,12 @@ done
 
 mkdir -p logs
 echo "$TASK" > logs/smoke-task.txt
+EXP=smoke_$(scripts/new_id.sh)            # all models of this smoke test in one experiment folder
+echo "$EXP" > logs/smoke-experiment.txt
 for M in $MODELS; do
   G=$(gpus_for "$M")
   JOB=$(sbatch --parsable --partition="$PARTITION" --time="$TIME" --gres="gpu:$GPU_TYPE:$G" --job-name="smoke-$M" \
-    --export="ALL,MODEL=$M,TP=$G,WORKERS=1,TASKS=$PWD/logs/smoke-task.txt,RB_MAX_SECONDS=$RB_MAX_SECONDS" \
+    --export="ALL,MODEL=$M,TP=$G,WORKERS=1,RB_EXPERIMENT=$EXP,TASKS=$PWD/logs/smoke-task.txt,RB_MAX_SECONDS=$RB_MAX_SECONDS" \
     scripts/slurm_run_model.sh) && echo "submitted $M on $G GPU(s): job $JOB  (log: logs/smoke-$M-$JOB.out)"
 done
 echo

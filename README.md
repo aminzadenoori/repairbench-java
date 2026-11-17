@@ -79,16 +79,19 @@ cat "$OUT/eval_logs/google__gson-2337_result.json"        # want "resolved": tru
 pip install -U "huggingface_hub[cli]"
 scripts/download_models.sh qwen3-coder-next
 apptainer build --fakeroot --build-arg VLLM_VERSION=v0.11.0 "$VLLM_SIF" environments/vllm.def
-SOCK=/tmp/$USER-rb/vllm.sock          # vLLM has no network: it answers on this socket file
-scripts/serve_model.sh qwen3-coder-next "$SOCK" 1 rbvllm &
+# vLLM has no network: it answers on a socket file. A unique name per server
+# (<user>_<timestamp>_<random>) keeps your sessions and other people's apart.
+SOCK=/tmp/$USER-rb/$(scripts/new_id.sh)/vllm.sock
+scripts/serve_model.sh qwen3-coder-next "$SOCK" &           # instance rbvllm_<same id>
 until curl -sf --unix-socket "$SOCK" http://localhost/v1/models >/dev/null; do sleep 10; done
 
 # 4. agent + evaluation on that task (the agent runs inside the sealed task container and
 #    reaches the socket through its own forwarder at 127.0.0.1:8000)
 echo google__gson-2337 > one.txt
+export RB_EXPERIMENT=try-gson                # results go to runs/try-gson/<model>/<task>/
 RB_RUNTIME=frozen scripts/run_experiment.sh qwen3-coder-next "$SOCK" \
     one.txt "$OUT" "$IMAGES" "$CACHE" "$RUNS"
-cat "$RUNS/qwen3-coder-next/google__gson-2337/result.json"   # "outcome": "resolved" or not
+cat "$RUNS/try-gson/qwen3-coder-next/google__gson-2337/result.json"   # "outcome": "resolved" or not
 ```
 
 ## Run everything
@@ -101,29 +104,38 @@ scripts/prepare_all.sh "$OUT"
 ./command_run_gold.sh                                     # gold check, one line per instance
 python3 scripts/score_gold.py "$OUT"                      # -> out/validated_tasks.txt
 
-# Stages 2 + 3: each of the four models
+# Stages 2 + 3: each of the four models, as one experiment
 scripts/download_models.sh                                # all four, once
-# (on the cluster use scripts/slurm_run_model.sh, which does the same per model as a job)
-SOCK=/tmp/$USER-rb/vllm.sock
-for M in qwen3-coder-next gpt-oss-120b devstral-small glm-4.7-flash; do   # one round per model
-  scripts/serve_model.sh "$M" "$SOCK" 1 rbvllm &
+export RB_EXPERIMENT=main-history-none                    # one name for all four models
+# on the cluster: one job per model, same experiment name (GPUs: see configs/models.json)
+#   sbatch --export=ALL,MODEL=qwen3-coder-next --gres=gpu:h200:2 scripts/slurm_run_model.sh
+#   sbatch --export=ALL,MODEL=gpt-oss-120b     --gres=gpu:h200:1 scripts/slurm_run_model.sh  ...
+# or by hand on one GPU node, one round per model:
+for M in qwen3-coder-next gpt-oss-120b devstral-small glm-4.7-flash; do
+  SOCK=/tmp/$USER-rb/$(scripts/new_id.sh)/vllm.sock
+  scripts/serve_model.sh "$M" "$SOCK" & VLLM=$!
   until curl -sf --unix-socket "$SOCK" http://localhost/v1/models >/dev/null; do sleep 10; done
   RB_RUNTIME=frozen scripts/run_experiment.sh "$M" "$SOCK" \
       "$OUT/validated_tasks.txt" "$OUT" "$IMAGES" "$CACHE" "$RUNS"
-  apptainer instance stop rbvllm; wait                    # stop vLLM, next model
+  kill $VLLM; wait                                        # stops vLLM, next model
 done
 
 # Results
-python3 scripts/summarize.py "$OUT" "$RUNS"               # runs/STATS.md, runs/metrics.json
+python3 scripts/summarize.py "$OUT" "$RUNS/$RB_EXPERIMENT"   # STATS.md, metrics.json there
 ```
 
-Every step skips work already done, so you can stop and restart at any time.
+Every step skips work already done, so you can stop and restart at any time. For stages
+2 + 3 that means: run again with the same `RB_EXPERIMENT`. Without `RB_EXPERIMENT`, each run
+gets a new unique experiment folder, so two people (or two of your jobs) never mix results.
+An experiment remembers its settings (`settings.json`: runtime, history, step and time limits,
+temperature); resuming it with different ones stops with a message.
 
 - **No network on compute nodes:** pull first on a network node
   (`scripts/pull_task_images.sh "$OUT" "$IMAGES" "$CACHE"`), then run the rest on compute nodes.
-- **In parallel:** split the task list (`split -n l/8 out/validated_tasks.txt part_`) and give
-  each job its own part with the same `runs/` folder; the gold-check lines can also run in
-  parallel (see [Reference](docs/REFERENCE.md#parallel-runs)).
+- **In parallel:** separate experiments just use different `RB_EXPERIMENT` names. To split one
+  experiment, give each job its own part of the task list (`split -n l/8 ...`) and the same
+  `RB_EXPERIMENT`; the gold-check lines can also run in parallel
+  (see [Reference](docs/REFERENCE.md#parallel-runs)).
 - **Little disk:** `RB_DELETE_IMAGE=1 ./command_run_gold.sh` keeps one image at a time, but
   Stages 2/3 then pull each image again.
 
@@ -135,8 +147,10 @@ Every step skips work already done, so you can stop and restart at any time.
 | overview of the tasks | `out/SUMMARY.md`, `out/manifest.json` |
 | gold check per task | `out/eval_logs/<id>_result.json`, details in `<task>/validation/` |
 | gold check summary | `out/eval_logs/scoring_results.json`, `out/validated_tasks.txt` |
-| one agent run | `runs/<model>/<id>/`: `candidate.patch`, `trajectory.jsonl`, `selftest.json`, `result.json` |
-| final numbers | `runs/STATS.md`, `runs/metrics.json` (Pass@1 per model, per repository) |
+| one agent run | `runs/<experiment>/<model>/<id>/`: `candidate.patch`, `trajectory.jsonl`, `selftest.json`, `result.json` |
+| experiment settings | `runs/<experiment>/<model>/settings.json` |
+| final numbers | `runs/<experiment>/STATS.md`, `runs/<experiment>/metrics.json` (Pass@1 per model, per repository) |
+| cluster job logs | `logs/` (Slurm output, `vllm-<model>-<id>.log`, `agents-<model>-<id>-*.log`) |
 
 ## Troubleshooting
 
@@ -148,8 +162,9 @@ Every step skips work already done, so you can stop and restart at any time.
 | pull fails with `unpack entry ... invalid argument` | the same log | `APPTAINER_TMPDIR` is on a network file system that rejects names like `:.1.gz`; use local disk: `export APPTAINER_TMPDIR=/tmp/$USER/apptainer-tmp` |
 | gold check `oracle_no_test_results` | `<task>/validation/oracle-*-1.log` | build failed offline: missing dependency, wrong JDK |
 | `WARNING ... no Maven/Gradle cache` | pull output | `/root` unreadable in the image and `--fakeroot` not allowed |
-| run status `leak_selftest_failed` | `runs/<model>/<id>/selftest.json` | the sandbox could reach the network or the image's repo copy |
-| agent `model_server_error` | `runs/<model>/<id>/trajectory.jsonl` | vLLM not up, wrong port or model name |
+| run status `leak_selftest_failed` | `runs/<experiment>/<model>/<id>/selftest.json` | the sandbox could reach the network or the image's repo copy |
+| agent `model_server_error` | `runs/<experiment>/<model>/<id>/trajectory.jsonl` | vLLM not up, wrong socket or model name |
+| `... was made with other settings` | the message | resuming an experiment with changed settings: use a new `RB_EXPERIMENT` |
 | agent never calls tools | trajectory | tool-parser flag for that model in `configs/models.json` |
 
 What has and has not been run yet is listed in [docs/PIPELINE.md](docs/PIPELINE.md#status).
