@@ -48,11 +48,18 @@ NGPU=$(apptainer exec --nv --containall "${GPU_ENV[@]}" "$VLLM_SIF" nvidia-smi -
 echo "GPUs given to vLLM: ${CUDA_VISIBLE_DEVICES:-<all on node>} ($NGPU visible in the container), tensor-parallel $TP"
 (( NGPU >= TP )) || { echo "need $TP GPUs for tensor-parallel $TP, the container sees $NGPU" >&2; exit 2; }
 
+# Several GPUs (tensor-parallel > 1): vLLM starts one process per GPU, and they meet over
+# torch.distributed at <host-ip>:<port>. The container has no network, so vLLM cannot look up
+# a host IP ("Failed to get the IP address, using 0.0.0.0"). Pin the meeting point to the
+# container's own loopback. GPU-to-GPU data goes over NVLink/PCIe and shared memory, not the
+# network, so this needs nothing outside the container.
+MULTI_GPU_ENV=(--env VLLM_HOST_IP=127.0.0.1 --env GLOO_SOCKET_IFNAME=lo --env NCCL_SOCKET_IFNAME=lo)
+
 apptainer instance start --nv --net --network none --containall --home "$STATE/home" "${GPU_ENV[@]}" \
   --bind "$MODELS_ROOT:/models:ro" --bind "$SOCKDIR:/sock" --bind "$STATE:/state" \
   --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env VLLM_NO_USAGE_STATS=1 --env DO_NOT_TRACK=1 \
   --env XDG_CACHE_HOME=/state/cache --env HF_HOME=/state/hf \
-  "$VLLM_SIF" "$INST" >/dev/null
+  "${MULTI_GPU_ENV[@]}" "$VLLM_SIF" "$INST" >/dev/null
 trap 'apptainer instance stop "$INST" >/dev/null 2>&1 || true' EXIT
 
 apptainer exec --pwd / "instance://$INST" vllm serve "/models/$NAME" --served-model-name "$NAME" \

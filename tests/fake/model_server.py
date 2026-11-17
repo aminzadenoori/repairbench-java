@@ -25,9 +25,15 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):                     # readiness check, as vLLM's /v1/models
+        self._send({"object": "list", "data": [{"id": "fake-model", "object": "model"}]})
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        assert body.get("tools"), "tools missing"
+        if not body.get("tools"):         # a plain question (e.g. check_multi_gpu.sh): plain answer
+            self._send({"choices": [{"message": {"role": "assistant", "content": "Hello."},
+                                     "finish_reason": "stop"}]})
+            return
         step = sum(1 for m in body["messages"] if m["role"] == "assistant")
         name, args = SCRIPT[min(step, len(SCRIPT) - 1)]
         msg = {"role": "assistant", "content": "",
@@ -35,7 +41,10 @@ class H(BaseHTTPRequestHandler):
                                "function": {"name": name, "arguments": json.dumps(args)}}]}
         resp = {"choices": [{"message": msg, "finish_reason": "tool_calls"}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 10}}
-        data = json.dumps(resp).encode()
+        self._send(resp)
+
+    def _send(self, obj):
+        data = json.dumps(obj).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))

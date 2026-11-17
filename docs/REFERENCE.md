@@ -25,6 +25,7 @@
 | `scripts/run_experiment.sh <model> <socket> list out IMAGES CACHE runs` | 2+3 | agent + evaluation over a task list, into `runs/$RB_EXPERIMENT/<model>/` |
 | `scripts/summarize.py out runs/<experiment>` | 3 | `metrics.json` + `STATS.md` |
 | `scripts/new_id.sh` | | prints a unique `<user>_<timestamp>_<random>` name |
+| `scripts/check_multi_gpu.sh [model] [gpus]` | 2 | on a GPU node: the model runs across all its GPUs in the sealed container |
 | `tests/e2e_fake.sh` | — | the whole pipeline with stand-ins |
 
 Helpers: `convert_tddbench.py`, `normalize_patches.py`, `detect_jdk.py`, `make_bundles.sh`,

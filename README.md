@@ -79,6 +79,8 @@ cat "$OUT/eval_logs/google__gson-2337_result.json"        # want "resolved": tru
 pip install -U "huggingface_hub[cli]"
 scripts/download_models.sh qwen3-coder-next
 apptainer build --fakeroot --build-arg VLLM_VERSION=v0.11.0 "$VLLM_SIF" environments/vllm.def
+# Model on several GPUs (qwen3-coder-next: 2)? Check once in a 2-GPU srun:
+#   scripts/check_multi_gpu.sh qwen3-coder-next 2     # PASSED = every GPU holds its part
 # vLLM has no network: it answers on a socket file. A unique name per server
 # (<user>_<timestamp>_<random>) keeps your sessions and other people's apart.
 SOCK=/tmp/$USER-rb/$(scripts/new_id.sh)/vllm.sock
@@ -164,6 +166,7 @@ temperature); resuming it with different ones stops with a message.
 | `WARNING ... no Maven/Gradle cache` | pull output | `/root` unreadable in the image and `--fakeroot` not allowed |
 | run status `leak_selftest_failed` | `runs/<experiment>/<model>/<id>/selftest.json` | the sandbox could reach the network or the image's repo copy |
 | agent `model_server_error` | `runs/<experiment>/<model>/<id>/trajectory.jsonl` | vLLM not up, wrong socket or model name |
+| out of memory with a 2-GPU model | `scripts/check_multi_gpu.sh <model> 2` | job got 1 GPU (`--gres=gpu:h200:2`?), or the GPU count in `configs/models.json` |
 | `... was made with other settings` | the message | resuming an experiment with changed settings: use a new `RB_EXPERIMENT` |
 | agent never calls tools | trajectory | tool-parser flag for that model in `configs/models.json` |
 
