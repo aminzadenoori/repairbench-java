@@ -32,20 +32,32 @@ while read -r TD; do
   if [[ ! -s $SIF ]]; then
     # SWE-PolyBench recommends its frozen :v1.1 tags; IBM's TDD-Bench harness pulls :latest.
     # Try the pinned tag first and record which one was used.
-    PULLED=""; : > "$SIF.pull.log"
+    # In a shared image folder someone else may pull the same image at the same time: pull to
+    # a name of our own, and keep whichever copy lands first.
+    TMP="$SIF.tmp.${USER:-u}.$$"
+    LOG="$SIF.pull.log"; [[ -e $LOG && ! -w $LOG ]] && LOG="$SIF.pull.${USER:-u}.log"
+    PULLED=""; : > "$LOG"
     for R in "$REF" "${REF%:v1.1}:latest"; do
       echo "pulling $R"
-      echo "===== apptainer pull $R" >> "$SIF.pull.log"     # keep every attempt's output
-      if apptainer pull --force "$SIF.tmp" "$R" </dev/null >>"$SIF.pull.log" 2>&1; then PULLED=$R; break; fi
+      echo "===== apptainer pull $R" >> "$LOG"     # keep every attempt's output
+      if apptainer pull --force "$TMP" "$R" </dev/null >>"$LOG" 2>&1; then PULLED=$R; break; fi
       [[ $R == "${REF%:v1.1}:latest" || $REF != *:v1.1 ]] && break
     done
     if [[ -z $PULLED ]]; then
-      echo "PULL FAILED $ID; last lines of $SIF.pull.log:"
-      grep -E 'FATAL|ERROR|error|denied|space|quota' "$SIF.pull.log" | tail -n 6 | sed 's/^/    /'
-      rm -f "$SIF.tmp"; FAILED=$((FAILED + 1)); continue
+      echo "PULL FAILED $ID; last lines of $LOG:"
+      grep -E 'FATAL|ERROR|error|denied|space|quota' "$LOG" | tail -n 6 | sed 's/^/    /'
+      rm -f "$TMP"; FAILED=$((FAILED + 1)); continue
     fi
-    echo "$PULLED" > "$SIF.source"
-    mv "$SIF.tmp" "$SIF"; sha256sum "$SIF" | cut -d' ' -f1 > "$SIF.sha256"
+    if [[ -s $SIF ]]; then
+      rm -f "$TMP"; echo "$ID: $(stat -c %U "$SIF") pulled it meanwhile; using that copy"
+    else
+      echo "$PULLED" > "$SIF.source"
+      mv "$TMP" "$SIF"; sha256sum "$SIF" | cut -d' ' -f1 > "$SIF.sha256"
+    fi
+  fi
+  if [[ ! -f $C/.done && -d $C && ! -w $C ]]; then
+    echo "WARNING $ID: $(stat -c %U "$C") is preparing its caches (or stopped halfway): $C"
+    FAILED=$((FAILED + 1)); continue
   fi
   if [[ ! -f $C/.done ]]; then
     mkdir -p "$C"

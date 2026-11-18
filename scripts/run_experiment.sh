@@ -14,7 +14,12 @@ IMAGES=${5:?images_dir}; CACHE=${6:?cache_dir}; RUNS_ROOT=${7:?runs_dir}
 EXP=${RB_EXPERIMENT:-$("$HERE/new_id.sh")}
 [[ $EXP =~ ^[A-Za-z0-9._-]+$ ]] || { echo "RB_EXPERIMENT may use only letters, digits, . _ -" >&2; exit 2; }
 RUNS=$RUNS_ROOT/$EXP
-mkdir -p "$RUNS/$MODEL"
+mkdir -p "$RUNS/$MODEL" 2>/dev/null || true
+if [[ ! -w $RUNS/$MODEL ]]; then             # shared runs folder: the name is taken
+  echo "experiment $EXP already belongs to $(stat -c %U "$RUNS" 2>/dev/null || echo someone else):" \
+       "choose another RB_EXPERIMENT" >&2
+  exit 2
+fi
 echo "experiment $EXP  ->  $RUNS/$MODEL/"
 
 # Settings that change results: recorded on the first run, and a resume must use the same ones.

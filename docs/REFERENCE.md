@@ -27,6 +27,8 @@
 | `scripts/new_id.sh` | | prints a unique `<user>_<timestamp>_<random>` name |
 | `scripts/check_multi_gpu.sh [model] [gpus]` | 2 | on a GPU node: the model runs across all its GPUs in the sealed container |
 | `tests/e2e_fake.sh` | — | the whole pipeline with stand-ins |
+| `scripts/setup_shared.sh [folder] [--move work]` | — | creates/checks the group's shared folder (default `/hpc/home/scratch/repairbench-java`) |
+| `tests/shared_storage_test.sh` | — | as root: the shared folder's permissions, with real test users |
 
 Helpers: `convert_tddbench.py`, `normalize_patches.py`, `detect_jdk.py`, `make_bundles.sh`,
 `parse_junit.py`, `lib.sh`.
@@ -37,15 +39,16 @@ Each one is kept if already set. For a first try everything stays inside the rep
 
 | Variable | Default | Holds |
 |---|---|---|
-| `RB_WORK` | `<repo>/work` | the large files below; move them all with `RB_WORK=/big/disk/rb source scripts/env.sh` |
-| `IMAGES` | `$RB_WORK/images` | `.sif` images (`tasks/<id>.sif` for the frozen runtime) |
-| `CACHE` | `$RB_WORK/cache` | Maven/Gradle caches |
-| `MODELS_ROOT` | `$RB_WORK/models` | model weights |
+| `RB_SHARED` | unset | group-shared folder (`scripts/setup_shared.sh`); when set, `IMAGES`, `CACHE`, `MODELS_ROOT` and `RUNS` default to it and files you create are group-readable (umask 0027) |
+| `RB_WORK` | `<repo>/work` | the large files below when `RB_SHARED` is unset; move them all with `RB_WORK=/big/disk/rb source scripts/env.sh` |
+| `IMAGES` | `$RB_SHARED/images` or `$RB_WORK/images` | `.sif` images (`tasks/<id>.sif` for the frozen runtime) |
+| `CACHE` | `$RB_SHARED/cache` or `$RB_WORK/cache` | Maven/Gradle caches |
+| `MODELS_ROOT` | `$RB_SHARED/models` or `$RB_WORK/models` | model weights |
 | `VLLM_SIF` | `$IMAGES/vllm.sif` | vLLM image |
 | `APPTAINER_CACHEDIR` | `$RB_WORK/apptainer-cache` | Apptainer's download cache |
 | `APPTAINER_TMPDIR` | `/tmp/$USER-rb-apptainer-tmp` | where images are unpacked while pulling; must be a local disk (10–20 GB free) |
 | `OUT` | `<repo>/out` | task folders, gold-check results |
-| `RUNS` | `<repo>/runs` | experiments: `runs/<experiment>/<model>/<task>/`, metrics |
+| `RUNS` | `$RB_SHARED/runs` or `<repo>/runs` | experiments: `runs/<experiment>/<model>/<task>/`, metrics |
 | `RB_EXPERIMENT` | new unique name per run | experiment folder under `RUNS`; same name = resume or add a model |
 
 ## Environment variables
@@ -97,4 +100,8 @@ split -n l/8 out/validated_tasks.txt part_
   them add more;
 - bundles: small for gson and the Jackson repos, hundreds of MB per task for trino, dubbo and
   rocketmq;
-- model weights: hundreds of GB for the four models.
+- model weights: hundreds of GB for the four models (qwen3-coder-next alone about 160 GB).
+
+On the Foundry, keep these once for the whole group in `/hpc/home/scratch` (see `RB_SHARED`):
+the lab folders `/hpc/home/<lab>` have a 15 TB soft / 20 TB hard limit, the shared scratch area
+150 TB soft (30 days grace) / 200 TB hard for all users together.

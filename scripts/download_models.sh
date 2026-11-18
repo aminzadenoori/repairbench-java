@@ -13,6 +13,12 @@ for m in json.load(open(sys.argv[1]))["models"]:
         print(m["name"], m["hf_repo"])
 EOF
 while read -r NAME REPO; do
+  D=$MODELS_ROOT/$NAME
+  if [[ -d $D && ! -w $D ]]; then          # shared folder: someone else downloaded it
+    if [[ -s $D.sha256 ]]; then echo "$NAME: already downloaded by $(stat -c %U "$D"); skipping"
+    else echo "$NAME: $(stat -c %U "$D") is downloading it (or stopped halfway); skipping"; fi
+    continue
+  fi
   echo "downloading $REPO -> $MODELS_ROOT/$NAME"
   hf download "$REPO" --local-dir "$MODELS_ROOT/$NAME"
   (cd "$MODELS_ROOT/$NAME" && find . -type f ! -path './.cache/*' -print0 | sort -z | xargs -0 sha256sum) \

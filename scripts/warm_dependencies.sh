@@ -6,6 +6,7 @@
 # The build runs with gold.patch AND test.patch applied, so test-only dependencies and the
 # Surefire/JUnit providers are cached as well. Test failures here are expected and ignored.
 set -euo pipefail
+umask 0007     # one Maven/Gradle cache that several people add to (see setup_shared.sh)
 RB_RUNTIME=built  # warm-up is only for the built runtime (frozen images bring their caches)
 . "$(dirname "$0")/lib.sh"
 TASK=$(cd "${1:?task_dir}" && pwd)
