@@ -4,17 +4,23 @@
 # Hugging Face offline. It answers on a Unix socket file on the node's local disk, so only
 # processes on the SAME node can talk to it: the agent harness of the same Slurm job.
 #
-#   scripts/serve_model.sh <model-name> <socket-path> [tensor-parallel] [instance-name]
+#   scripts/serve_model.sh <model-name> [socket-path] [tensor-parallel] [instance-name]
+# socket-path: "" or "auto" makes a unique one, /tmp/$USER-rb/<id>/vllm.sock with
+#   <id> = <user>_<timestamp>_<random> (scripts/new_id.sh); the first output line says which.
 # tensor-parallel (= number of GPUs) defaults to the model's "tensor_parallel" in
-# configs/models.json; give "" to keep that default and still name the instance.
-#   e.g. scripts/serve_model.sh gpt-oss-120b /tmp/$USER-rb/vllm.sock 1 rbvllm_123
+#   configs/models.json; give "" to keep that default and still name the instance.
+# instance-name defaults to rbvllm_<id>, <id> being the socket's folder name.
+#   e.g. SOCK=/tmp/$USER-rb/$(scripts/new_id.sh)/vllm.sock
+#        scripts/serve_model.sh gpt-oss-120b "$SOCK"
 # Agent containers mount the socket folder and reach it via agent/uds_proxy.py.
 # Stays in the foreground while the server runs; stopping it stops the instance.
 set -euo pipefail
-NAME=${1:?usage: serve_model.sh <model-name> <socket-path> [tp] [instance-name]}
-SOCK=${2:?socket path, on a local disk of this node}
+NAME=${1:?usage: serve_model.sh <model-name> [socket-path|auto] [tp] [instance-name]}
+SOCK=${2:-auto}
 TP=${3:-}
-INST=${4:-rbvllm_$$}
+[[ $SOCK == auto ]] && SOCK=/tmp/${USER:-$(id -un)}-rb/$("$(dirname "$0")/new_id.sh")/vllm.sock
+INST=${4:-rbvllm_$(basename "$(dirname "$SOCK")")}
+echo "socket: $SOCK   instance: $INST"
 MODELS_ROOT=${MODELS_ROOT:?set MODELS_ROOT}
 VLLM_SIF=${VLLM_SIF:?set VLLM_SIF to an Apptainer image with vLLM}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -42,11 +48,18 @@ NGPU=$(apptainer exec --nv --containall "${GPU_ENV[@]}" "$VLLM_SIF" nvidia-smi -
 echo "GPUs given to vLLM: ${CUDA_VISIBLE_DEVICES:-<all on node>} ($NGPU visible in the container), tensor-parallel $TP"
 (( NGPU >= TP )) || { echo "need $TP GPUs for tensor-parallel $TP, the container sees $NGPU" >&2; exit 2; }
 
+# Several GPUs (tensor-parallel > 1): vLLM starts one process per GPU, and they meet over
+# torch.distributed at <host-ip>:<port>. The container has no network, so vLLM cannot look up
+# a host IP ("Failed to get the IP address, using 0.0.0.0"). Pin the meeting point to the
+# container's own loopback. GPU-to-GPU data goes over NVLink/PCIe and shared memory, not the
+# network, so this needs nothing outside the container.
+MULTI_GPU_ENV=(--env VLLM_HOST_IP=127.0.0.1 --env GLOO_SOCKET_IFNAME=lo --env NCCL_SOCKET_IFNAME=lo)
+
 apptainer instance start --nv --net --network none --containall --home "$STATE/home" "${GPU_ENV[@]}" \
   --bind "$MODELS_ROOT:/models:ro" --bind "$SOCKDIR:/sock" --bind "$STATE:/state" \
   --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 --env VLLM_NO_USAGE_STATS=1 --env DO_NOT_TRACK=1 \
   --env XDG_CACHE_HOME=/state/cache --env HF_HOME=/state/hf \
-  "$VLLM_SIF" "$INST" >/dev/null
+  "${MULTI_GPU_ENV[@]}" "$VLLM_SIF" "$INST" >/dev/null
 trap 'apptainer instance stop "$INST" >/dev/null 2>&1 || true' EXIT
 
 apptainer exec --pwd / "instance://$INST" vllm serve "/models/$NAME" --served-model-name "$NAME" \

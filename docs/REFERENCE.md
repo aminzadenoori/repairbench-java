@@ -22,8 +22,10 @@
 | `scripts/run_agent.sh <task> <model> <socket> IMAGES CACHE runs` | 2 | one model on one task, with leak self-test; agent inside the sealed container (`RB_AGENT_WHERE=host` to run it outside) |
 | `scripts/leak_selftest.sh out.json history hidden -- <exec>` | 2 | the sandbox checks, on their own |
 | `scripts/evaluate_candidate.sh <task> <run_dir> IMAGES CACHE` | 3 | score one `candidate.patch` |
-| `scripts/run_experiment.sh <model> <url> list out IMAGES CACHE runs` | 2+3 | agent + evaluation over a task list |
-| `scripts/summarize.py out runs` | 3 | `metrics.json` + `STATS.md` |
+| `scripts/run_experiment.sh <model> <socket> list out IMAGES CACHE runs` | 2+3 | agent + evaluation over a task list, into `runs/$RB_EXPERIMENT/<model>/` |
+| `scripts/summarize.py out runs/<experiment>` | 3 | `metrics.json` + `STATS.md` |
+| `scripts/new_id.sh` | | prints a unique `<user>_<timestamp>_<random>` name |
+| `scripts/check_multi_gpu.sh [model] [gpus]` | 2 | on a GPU node: the model runs across all its GPUs in the sealed container |
 | `tests/e2e_fake.sh` | — | the whole pipeline with stand-ins |
 
 Helpers: `convert_tddbench.py`, `normalize_patches.py`, `detect_jdk.py`, `make_bundles.sh`,
@@ -43,7 +45,8 @@ Each one is kept if already set. For a first try everything stays inside the rep
 | `APPTAINER_CACHEDIR` | `$RB_WORK/apptainer-cache` | Apptainer's download cache |
 | `APPTAINER_TMPDIR` | `/tmp/$USER-rb-apptainer-tmp` | where images are unpacked while pulling; must be a local disk (10–20 GB free) |
 | `OUT` | `<repo>/out` | task folders, gold-check results |
-| `RUNS` | `<repo>/runs` | agent runs, evaluation results, metrics |
+| `RUNS` | `<repo>/runs` | experiments: `runs/<experiment>/<model>/<task>/`, metrics |
+| `RB_EXPERIMENT` | new unique name per run | experiment folder under `RUNS`; same name = resume or add a model |
 
 ## Environment variables
 
@@ -72,7 +75,10 @@ Set per task in `manifest.json` and `metadata.json`:
 ## Parallel runs
 
 Every instance and every run uses its own folders, so jobs can share `out/`, `runs/` and the
-image folder.
+image folder. Names that could clash carry a unique `<user>_<timestamp>_<random>` id
+(`scripts/new_id.sh`): the vLLM socket folder `/tmp/$USER-rb/<id>/`, its instance `rbvllm_<id>`
+and logs, and the experiment folder when `RB_EXPERIMENT` is not set. Two experiments only share
+results if they are given the same `RB_EXPERIMENT`, and then their settings must match.
 
 ```bash
 # gold check, 4 at a time
@@ -81,7 +87,8 @@ grep "^scripts/run_gold" command_run_gold.sh | parallel -j 4
 
 # agent runs, 8 cluster jobs for one model
 split -n l/8 out/validated_tasks.txt part_
-# job k: scripts/run_experiment.sh <model> <url> part_<k> "$OUT" "$IMAGES" "$CACHE" "$RUNS"
+# job k, all with the same RB_EXPERIMENT:
+#   RB_EXPERIMENT=<name> scripts/run_experiment.sh <model> <socket> part_<k> "$OUT" "$IMAGES" "$CACHE" "$RUNS"
 ```
 
 ## Disk

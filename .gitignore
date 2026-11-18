@@ -6,3 +6,5 @@ mirrors/
 out/
 runs/
 work/
+logs/*
+!logs/.gitkeep

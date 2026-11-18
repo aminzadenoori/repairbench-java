@@ -1,13 +1,16 @@
 #!/bin/bash
 # Stages 2+3 for ONE model as a Slurm job on the Foundry GPU nodes:
 # start vLLM on the allocated GPUs, wait until it answers, run agent + evaluation over a
-# task list, stop vLLM. Resumable: finished tasks are skipped if the job is resubmitted.
+# task list, stop vLLM. Results go to $RUNS/$RB_EXPERIMENT/<model>/; without RB_EXPERIMENT
+# the job makes a new unique one (printed at the top of its log). Resubmit with the same
+# RB_EXPERIMENT to resume: finished tasks are skipped.
 #
 #   sbatch --export=ALL,MODEL=gpt-oss-120b,TP=1 --gres=gpu:h200:1 scripts/slurm_run_model.sh
 #   sbatch --export=ALL,MODEL=qwen3-coder-next --gres=gpu:h200:2 scripts/slurm_run_model.sh
 # TP (number of GPUs) defaults to the model's "tensor_parallel" in configs/models.json;
 # --gres must ask for that many GPUs.
-# Optional: TASKS=<file with instance ids> (default: out/validated_tasks.txt),
+# Optional: RB_EXPERIMENT=<name> (default: a new <user>_<timestamp>_<random>),
+#           TASKS=<file with instance ids> (default: out/validated_tasks.txt),
 #           WORKERS=<agents in parallel against the one vLLM server> (default 4)
 #
 #SBATCH --job-name=rb-model
@@ -32,10 +35,14 @@ TASKS=${TASKS:-$OUT/validated_tasks.txt}
 # Both containers run on THIS node, both with no network: vLLM answers on a socket file on
 # local disk; every agent container mounts that folder and reaches it through its own
 # forwarder at 127.0.0.1:8000 (see agent/in_container.sh).
-JOBTAG=${SLURM_JOB_ID:-local$$}
-SOCK=/tmp/$USER-rb-$JOBTAG/vllm.sock
-VINST=rbvllm_$JOBTAG
-VLOG=logs/vllm-$MODEL-$JOBTAG.log
+# Unique names (scripts/new_id.sh: <user>_<timestamp>_<random>) for this job's vLLM server,
+# and for the experiment folder unless RB_EXPERIMENT names one (same name = resume / add a model).
+RUN_ID=$(scripts/new_id.sh)
+SOCK=/tmp/$USER-rb/$RUN_ID/vllm.sock
+VINST=rbvllm_$RUN_ID
+VLOG=logs/vllm-$MODEL-$RUN_ID.log
+export RB_EXPERIMENT=${RB_EXPERIMENT:-$(scripts/new_id.sh)}
+echo "experiment $RB_EXPERIMENT  ->  results in $RUNS/$RB_EXPERIMENT/$MODEL/   (job ${SLURM_JOB_ID:-local}, run id $RUN_ID)"
 
 echo "node $(hostname)  model $MODEL  tp $TP  socket $SOCK  tasks $(grep -c . "$TASKS")"
 nvidia-smi -L
@@ -61,7 +68,7 @@ if apptainer exec "instance://$VINST" python3 -c \
      "import socket; socket.create_connection(('140.82.112.3', 443), 10)" >/dev/null 2>&1; then
   echo "ABORT: the vLLM container can reach the internet"; exit 1
 fi
-echo '{"vllm_network_sealed": true}' > "logs/vllm-selftest-$MODEL-$JOBTAG.json"
+echo '{"vllm_network_sealed": true}' > "logs/vllm-selftest-$MODEL-$RUN_ID.json"
 echo "vLLM container sealed: no internet access"
 
 # WORKERS agents share the one vLLM server: the task list is split into WORKERS parts and
@@ -73,7 +80,8 @@ for P in "$PARTS"/part_*; do
   [[ -s $P ]] || continue
   RB_RUNTIME=${RB_RUNTIME:-frozen} scripts/run_experiment.sh \
     "$MODEL" "$SOCK" "$P" "$OUT" "$IMAGES" "$CACHE" "$RUNS" \
-    >"logs/agents-$MODEL-${SLURM_JOB_ID:-local}-$(basename "$P").log" 2>&1 &
+    >"logs/agents-$MODEL-$RUN_ID-$(basename "$P").log" 2>&1 &
 done
 wait
-python3 -I scripts/summarize.py "$OUT" "$RUNS"
+python3 -I scripts/summarize.py "$OUT" "$RUNS/$RB_EXPERIMENT"
+echo "experiment $RB_EXPERIMENT done: $RUNS/$RB_EXPERIMENT/STATS.md"

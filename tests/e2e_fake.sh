@@ -87,4 +87,21 @@ for RT in built frozen; do
   check "$T/runs/empty-model/demo__calc-1/result.json" 'd["outcome"]=="empty_patch"'
   python3 -I "$ROOT/scripts/summarize.py" "$OUT" "$T/runs" | grep -E '^\| (fake|bad|empty)'
 done
+# Experiments: an unnamed run gets its own results folder, a named one resumes, and changed
+# settings stop instead of mixing results.
+echo demo__calc-1 > "$T/one.txt"
+X=("$SOCK" "$T/one.txt" "$OUT" "$T/images" "$T/cache" "$T/xruns")
+RB_RUNTIME=built "$ROOT/scripts/run_experiment.sh" fake-model "${X[@]}" > "$T/x1.log" 2>&1
+RB_RUNTIME=built "$ROOT/scripts/run_experiment.sh" fake-model "${X[@]}" > "$T/x2.log" 2>&1
+[[ $(find "$T/xruns" -mindepth 1 -maxdepth 1 -type d | wc -l) == 2 ]] && echo "two unnamed runs -> two experiment folders" || { echo "FAIL: two unnamed runs -> two experiment folders"; exit 1; }
+RB_RUNTIME=built RB_EXPERIMENT=e1 "$ROOT/scripts/run_experiment.sh" fake-model "${X[@]}" > "$T/x3.log" 2>&1
+check "$T/xruns/e1/fake-model/demo__calc-1/result.json" 'd["outcome"]=="resolved"'
+check "$T/xruns/e1/fake-model/settings.json" 'd["runtime"]=="built" and d["max_steps"]=="100"'
+RB_RUNTIME=built RB_EXPERIMENT=e1 "$ROOT/scripts/run_experiment.sh" fake-model "${X[@]}" > "$T/x4.log" 2>&1
+grep -q "done already: demo__calc-1" "$T/x4.log" && echo "same experiment name -> resumed, task skipped" || { echo "FAIL: same experiment name -> resumed, task skipped"; exit 1; }
+if RB_RUNTIME=built RB_EXPERIMENT=e1 RB_MAX_STEPS=5 "$ROOT/scripts/run_experiment.sh" fake-model "${X[@]}" > "$T/x5.log" 2>&1; then
+  echo "FAIL: resuming e1 with other settings should stop"; exit 1
+fi
+grep -q "other settings" "$T/x5.log" && echo "same name, other settings -> stopped" || { echo "FAIL: same name, other settings -> stopped"; exit 1; }
+
 echo "ALL E2E CHECKS PASSED"
