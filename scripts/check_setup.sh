@@ -69,6 +69,13 @@ if have unshare && unshare -rn true 2>/dev/null; then ok "user namespaces allowe
 else warn "user namespaces not allowed for this user" "tests/e2e_fake.sh will run, but its leak self-test check fails on purpose"; fi
 
 # -------------------------------------------------------------------------- network
+if [[ -n ${RB_SHARED:-} ]]; then
+  ok "group-shared folder $RB_SHARED (group $(stat -c %G "$RB_SHARED"); weights, images, caches, runs)"
+elif [[ -d /hpc/home/scratch ]]; then
+  warn "large files are in your clone ($RB_WORK), not in the group's shared scratch area" \
+       "scripts/setup_shared.sh (once per group), then: export RB_SHARED=/hpc/home/scratch/repairbench-java"
+fi
+
 section "2. Network (Stage 1 needs it; Stages 2-3 run offline)"
 read -r POLY_ID MSWE_IMG < <(python3 -I - "$REPO/data/java.csv" <<'EOF'
 import csv, sys

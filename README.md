@@ -60,6 +60,27 @@ first. Typical ones:
 Large files go to `work/` inside the repo by default, which is fine for a first try. When
 you scale up, put them on a bigger disk with `RB_WORK=/big/disk/rb source scripts/env.sh`.
 
+### On the Foundry: one shared copy for the group
+
+The cluster has a group-shared scratch area, `/hpc/home/scratch` (limits for all users: soft
+150 TB with 30 days grace, hard 200 TB; lab folders `/hpc/home/<lab>` are limited to 15 TB soft
+and 20 TB hard). Keep the large files there once, instead of one copy per person in each clone:
+
+```bash
+scripts/setup_shared.sh                                 # once per group, by anyone
+scripts/setup_shared.sh --move ~/repairbench-java/work  # optional: move what you already have
+echo 'export RB_SHARED=/hpc/home/scratch/repairbench-java' >> ~/.bashrc   # everyone
+source ~/.bashrc && source scripts/env.sh               # prints RB_SHARED=...
+```
+
+With `RB_SHARED` set, model weights, task images, caches and experiment results live there;
+task folders (`out/`), logs and Apptainer's own cache stay in your clone. The folders behave
+like the scratch area itself: everyone in the group can read everything and add their own
+files, nobody can change, delete or rename another person's files, and other users see
+nothing. So a model or image someone already downloaded is reused, two people pulling the same
+image at once both end up with the one copy, and an experiment name that someone else already
+used is refused with a message. `tests/shared_storage_test.sh` checks this with real users.
+
 Optional: `tests/e2e_fake.sh` runs the whole pipeline on a synthetic task with stand-ins
 (no Apptainer, Maven or GPU needed) and ends with `ALL E2E CHECKS PASSED`.
 
@@ -167,6 +188,8 @@ temperature); resuming it with different ones stops with a message.
 | run status `leak_selftest_failed` | `runs/<experiment>/<model>/<id>/selftest.json` | the sandbox could reach the network or the image's repo copy |
 | agent `model_server_error` | `runs/<experiment>/<model>/<id>/trajectory.jsonl` | vLLM not up, wrong socket or model name |
 | out of memory with a 2-GPU model | `scripts/check_multi_gpu.sh <model> 2` | job got 1 GPU (`--gres=gpu:h200:2`?), or the GPU count in `configs/models.json` |
+| `RB_SHARED=... is not set up (or not writable for you)` | `scripts/setup_shared.sh <folder>` | folder not created yet, or you are not in its group |
+| `experiment X already belongs to Y` | the message | someone else used that `RB_EXPERIMENT` name in the shared runs folder: pick another |
 | `... was made with other settings` | the message | resuming an experiment with changed settings: use a new `RB_EXPERIMENT` |
 | agent never calls tools | trajectory | tool-parser flag for that model in `configs/models.json` |
 
